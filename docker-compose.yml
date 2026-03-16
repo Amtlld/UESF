@@ -1,0 +1,37 @@
+services:
+  app:
+    # 1. 构建配置
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: erp-benchmark-env:latest
+    container_name: erp-container
+    
+    # 2. 交互模式 (相当于 -it)
+    # 保证容器启动后不会立即退出，方便我们进去跑命令
+    stdin_open: true 
+    tty: true
+    
+    # 3. 挂载代码
+    volumes:
+      - .:/workspace
+    
+    # 4. 端口映射
+    ports:
+      - "8888:8888"
+      
+    # 5. 共享内存，PyTorch DataLoader 多进程必须配置项
+    ipc: host
+    
+    # 6. GPU 配置 (相当于 --gpus all)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    # 7. 默认命令
+    # 启动时保持 shell 活跃
+    command: /bin/bash
