@@ -92,4 +92,5 @@ Preprocess a raw dataset.
 Options:
   --help  Show this message and exit.
   --config <path>  Path to the preprocess configuration file.
+  --output-name <name>  Name of the output preprocessed dataset.
 ```

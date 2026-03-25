@@ -18,6 +18,5 @@ Management Commands:
   raw  Manage raw dataset.
   preprocessed  Manage preprocessed dataset.
   project  Manage project.
-  model  Manage model.
   set  Set global configuration.
 ```

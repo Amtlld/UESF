@@ -29,13 +29,15 @@ UESF的开发环境使用Docker容器，
 
 使用`uesf raw preprocess <raw-dataset-name>`命令对原始数据集进行预处理。您可以添加参数`--config <path>`来指定预处理配置，否则UESF将自动加载当前工作区下名为`preprocess.yml`的配置文件。
 
-生成的预处理数据集将存放在数据目录下（默认为~/.uesf/data/processed/<raw-dataset-name>，您可以通过uesf set命令进行自定义）。预处理数据集的目录结构如下：
+> 注意：如果需要，您应当在`preprocess.yml`中指定预处理数据集的名称，或在命令中添加参数`--output-name <processed-dataset-name>`，否则UESF将基于原始数据集的名称自动生成预处理数据集的名称。
+
+生成的预处理数据集将存放在数据目录下（默认为~/.uesf/data/processed/<processed-dataset-name>，您可以通过uesf set命令进行自定义）。预处理数据集的目录结构如下：
 ```
-<raw-dataset-name>
+<processed-dataset-name>
 ├── preprocessed.yml
-└── <subject-id>.mat
+└── <subject-id>.npy
 ```
-其中，`preprocessed.yml`文件包含预处理数据集的元信息，包括数据集名称、采样率、被试数、记录数、通道数、采样点数、类别数、电极列表等。`<subject-id>.mat`文件包含预处理数据集的EEG数据和标签，形状分别为(记录数, 通道数, 采样点数)和(记录数, 标签维数)。
+其中，`preprocessed.yml`文件包含预处理数据集的元信息，包括数据集名称、采样率、被试数、记录数、通道数、采样点数、类别数、电极列表等。`<subject-id>.npy`文件包含预处理数据集的EEG数据和标签，形状分别为(记录数, 通道数, 采样点数)和(记录数, 标签维数)。
 
 > 标签维数大于1时，可以保存除了类别标签之外的其它信息。一般情况下，应该使用这一维度的下标0表示类别。
 

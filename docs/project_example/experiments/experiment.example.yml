@@ -1,0 +1,70 @@
+experiment-name: <experiment-name>
+description: <experiment-description>
+
+# 随机种子，确保EEG实验和分布对齐的绝对可复现性
+seed: <int>
+
+# 实验挂载的模型
+model:
+  name: <model-name>  # 必须在 project.yml 中已注册 (对应 models 字段)
+  params:  # 传递给该模型初始化 __init__ 的自定义参数键值对
+    <param-key>: <param-value>
+    # <param-key>: <param-value>
+
+# 1. 数据集定义池与切分策略 (Datasets & Splitters)
+# 在此定义实验使用到的底层数据源及其独立的验证切分模式
+datasets:
+  <dataset-alias>:  # 自定义别名，例如 "source_pool", "target_pool"
+    name: <preprocessed-dataset-name>  # 必须在 project.yml 中已注册 (对应 preprocessed_datasets)
+    split:
+      strategy: <strategy>  # 切分策略，可选项 ["holdout", "k-fold"]
+      dimension: <dimension>  # 切分粒度维度，可选项 ["none", "subject", "record", "dataset"]
+      
+      # [k-fold 专有配置]:
+      k-folds: <int>  # 折数。若为 "total" 或 -1 则表示留一法 (Leave-One-Out CV)
+      val_ratio_in_train: <float>  # 在K折中，从训练折里再划分出多大比例作为早停验证集
+      
+      # [holdout 专有配置]:
+      train_ratio: <float>  # 训练集占比，例如 1.0 (全量供训练使用)
+      val_ratio: <float>  # 验证集占比
+      test_ratio: <float>  # 测试集占比
+
+  # 可挂载多个别名数据集 (支持多源域自适应实验)
+  # <dataset-alias-2>: 
+  #   ...
+
+# 2. 多通道数据加载器映射 (Multi-channel Dataloaders Mapping)
+# 利用切分出的虚拟快照 (如 .train, .val, .test)，自由组装 Dataloader 字典
+dataloaders:
+  train:
+    # 格式: <流通道名称>: "<dataset-alias>.<split-phase>"
+    # 引擎会将此构造成一个字典抛给模型 def training_step(self, batch)
+    <channel_name>: "<dataset-alias>.train" 
+    # src_labeled: "source_pool.train"
+    # tgt_unlabeled: "target_pool.train"
+  
+  val:
+    <channel_name>: "<dataset-alias>.val"
+    # main: "target_pool.val"
+
+  test:
+    <channel_name>: "<dataset-alias>.test"
+    # main: "target_pool.test"
+
+# 3. 基础训练超参数 (会覆盖 project.yml 中的同名字段)
+training:
+  epochs: <int>  # 训练轮次
+  batch-size: <int>  # 批次大小
+  learning-rate: <float>  # 学习率
+  optimizer: <optimizer>  # 优化器名称，例如 "AdamW"
+  # 可选：扩展挂载的回调机制路径
+  # callbacks: [<path-to-callback>] 
+
+# 4. 评估配置策略 (会覆盖 project.yml 中的同名字段)
+evaluation:
+  metrics: [<metric-name>]  # 需要关注的评价指标列表，可选项 ["accuracy", "f1_score", "auroc", ...]
+
+# 5. 日志与追踪 (Logging)
+logging:
+  use_wandb: <bool>  # 是否开启 Weights & Biases 在线记录
+  checkpoint_metric: <metric-name>  # 保存最佳模型权重的依据指标，例如 "val_f1_score"
