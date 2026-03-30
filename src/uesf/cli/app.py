@@ -68,9 +68,13 @@ def _format_uesf_error(exc: UESFException) -> Panel:
 def _register_sub_apps() -> None:
     from uesf.cli.config_cmd import config_app
     from uesf.cli.data_cmd import data_app
+    from uesf.cli.model_cmd import model_app
+    from uesf.cli.trainer_cmd import trainer_app
 
     app.add_typer(config_app, name="config")
     app.add_typer(data_app, name="data")
+    app.add_typer(model_app, name="model")
+    app.add_typer(trainer_app, name="trainer")
 
 
 _register_sub_apps()
