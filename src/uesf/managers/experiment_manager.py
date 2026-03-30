@@ -432,11 +432,9 @@ class ExperimentManager:
                 hint="Register or preprocess the dataset first.",
             )
 
-        data_path = Path(row["data_path"])
-        labels_path = Path(row["labels_path"])
-
-        data = np.load(str(data_path))
-        labels = np.load(str(labels_path))
+        data_dir = Path(row["data_dir_path"])
+        data = np.load(str(data_dir / "eeg_data.npy"))
+        labels = np.load(str(data_dir / "labels.npy"))
 
         # Flatten to (n_total_samples, channels, samples) for DataLoader
         original_shape = data.shape
