@@ -41,6 +41,7 @@ datasets:
     split:
       strategy: <strategy>   # "holdout" 或 "k-fold"
       dimension: <dimension> # "subject", "dataset", "session", 或 "none"
+      shuffle: <bool>        # 是否打乱数据参与切分。True 适用需要随机打乱数据的情况，False 适用需要按时序或物理顺序划分数据集的情况
       
       # [k-fold 专有]:
       k-folds: <int>         # 若为 "total" 或 -1 则表示留一法 (LOOCV)
@@ -170,7 +171,28 @@ metrics:
 
 UESF 支持通过以下命令管理全局指标：`uesf metric add` / `uesf metric list` / `uesf metric remove` / `uesf metric edit`。`uesf metric list` 默认隐藏过时记录，可通过 `--show-obsolete` 参数显示。
 
-## 5. 添加、删除和查询实验
+## 5. 运行时数据流与在线预处理 (Runtime Data Flow & Online Preprocessing)
+
+在 UESF 中，预处理完成后的数据集加载以及训练前的动态处理流程（在线预处理）遵循严格的先后顺序，以确保数据隔离与处理逻辑的正确性。从读取硬盘数据到输入模型，数据流经历以下四个关键阶段：
+
+### 5.1 数据读取与特征关联 (Data Loading & Masking)
+首先，Experiment Manager 会根据配置加载对应的预处理数据集特征张量（`.npy`）和标签张量。如果选用的是跨域或多任务重组产生的 Masked Dataset，系统将在底层通过视图映射（View）将原始特征与新建立的标签关联起来，不会产生物理层的多余复制。加载后，数据集对象维持了包含 `subject, session, recording, channel, sample` 维度的完整多维形态。
+
+### 5.2 索引隔离与数据切分 (Splitter Logic)
+在数据就绪后，**数据集切分器 (Splitter)** 会立即介入。它不会直接拷贝或打乱原始多维张量，而是依据配置的 `datasets.split` 计算并记录对应的**索引快照 (Index Views)**：
+- **动态乱序控制 (Shuffle Control)**：通过显式指定 `shuffle` 参数，决定切分前数据的排列状态。`shuffle: True` 适用于需要随机独立同分布假设的数据打乱；`shuffle: False` 则强制维持数据的固有阵列或时序序列，适用于需要依时序进行前测/后测等留出验证的情况。
+- **基于维度的隔离 (Dimension-based Isolation)**：切分可针对特定的 `dimension`（如要求强制按被试 `subject` 或记录域 `session` 切分），这意味着同一对象的特征序列不论何时都能作为一个不可分割的整体归属于训练或测试集，从根源上防止了基于时序或生理结构相近性的数据泄露 (Data Leakage)。
+- **切分相位映射 (Phases Mapping)**：无论是采用 `K-Fold`（交叉验证）还是 `Holdout`（保留验证集法），Splitter 最终都将为这个 Dataset 抽象生成 `train`、`val` 和 `test` 三个逻辑相位的数据集子对象。
+
+### 5.3 在线变换与严格标准化 (Online Transforms & Z-Score)
+切分就绪后，系统执行在线数据变换（On-the-fly Transforms）。这是避免全局信息泄露的核心设计。UESF 强制要求所有全局范围的特征归一化（如跨被试全局 Z-Score 标准化）必须且只能在完成切分后的这一刻进行：
+- **Fit-on-Train 拟合原则**：使用明确的 `fit_on: "train"` 指令时，标准化函数（如 `zscore_normalize`）计算数据集特征均值 (Mean) 和标准差 (Std) 的采样样本，将**严格局限**在这个切分轮次所产生的 `train` 相位内部。
+- **Apply-to-All 一致性广播**：随后，采用由训练集推导出来的唯一且固定的变换规则，通过 `apply_to: "all"` 依次对隔离状态下的 `train`、`val` 和 `test` 相位执行平移和缩放计算。该操作完美确保了验证和测试数据本身的统计分布能够对模型和归一化器处于完全保密的状态。
+
+### 5.4 多通道组装与特征交付 (Multi-Channel Dataloading)
+当所有安全变换与标准化均执行完毕，最后由 `Dataloaders` 模块开始调度。它读取配置文件中的通道挂载路由（例如 `src_labeled: "alias_A.train"`），将这些相互独立的划分阶段实例化为 PyTorch 的 DataLoader 控制器。运行伊始，底层的联合迭代器 (Combined Iterator) 同步抽取各个通道的数据，合并组织为一个包含多键值对的 `batch` 字典，并最终委托交付给 `Trainer` 的 `training_step` 方法，至此整个执行前置的数据流动闭环。
+
+## 6. 添加、删除和查询实验
 
 UESF 提供命令，允许用户添加、删除和查询实验。
 
