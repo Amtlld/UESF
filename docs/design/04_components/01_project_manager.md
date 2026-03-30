@@ -45,9 +45,9 @@ metrics:
 
 ## 2. 组件名称解析优先级
 
-当用户在实验配置中引用模型或训练器名称时，系统按照以下优先级进行解析（由高到低）：
-1. **项目级自定义组件**：在当前 `project.yml` 的 `models` 或 `trainers` 块中注册的组件
-2. **全局自定义组件**（GLOBAL）：通过 `uesf model add` / `uesf trainer add` 导入的全局组件
+当用户在实验配置中引用模型、训练器或评估指标名称时，系统按照以下优先级进行解析（由高到低）：
+1. **项目级自定义组件**：在当前 `project.yml` 的 `models`、`trainers` 或 `metrics` 块中注册的组件
+2. **全局自定义组件**（GLOBAL）：通过 `uesf model add` / `uesf trainer add` / `uesf metric add` 导入的全局组件
 3. **内置组件**（EMBEDDED）：UESF 内置提供的组件
 
 若项目级自定义名与全局或内置名冲突，系统将优先使用项目级定义，并在日志中输出一条 Warning 提示用户存在名称遮蔽。

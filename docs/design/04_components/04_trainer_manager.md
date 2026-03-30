@@ -53,17 +53,19 @@ class BaseTrainer:
     def configure_optimizers(self) -> Optional[Tuple[torch.optim.Optimizer, Any]]:
         """
         (可选) 配置特定优化器和学习率调度器。
-        
+
         若此方法返回非 None 值，系统将使用其返回的优化器和调度器，
         即使实验 YAML 中同时定义了 training.optimizer 等字段，
         系统也会忽略 YAML 中的优化器配置，并在日志中发出 Warning 提示。
-        
+        该优化器实例同样会作为 optimizer 参数传入 training_step()。
+
         若此方法返回 None（默认行为），系统将回退使用 YAML 配置中的
-        training.optimizer / training.learning_rate 等字段构建优化器。
-        
+        training.optimizer / training.learning_rate 等字段构建优化器，
+        并将其传入 training_step()。
+
         :return: (optimizer, scheduler) 元组，或 None
         """
-        return None 
+        return None
 
     def training_step(
         self,
@@ -120,3 +122,20 @@ UESF 支持用户对：
 - 全局自定义训练器进行查看、移除、修改信息等操作；
 - 已注册的自定义训练器进行查看、移除、修改信息、导入（成为全局训练器）等操作；
 - 未注册的自定义训练器进行注册、导入（成为全局训练器）等操作。
+
+### 3.1 REGISTERED 训练器的源码变更自动检测与重新注册
+
+此机制**仅作用于 `REGISTERED` 类型**（entrypoint 指向用户项目目录的训练器）。`EMBEDDED` 和 `GLOBAL` 类型不受影响。
+
+在 `uesf experiment run` 执行的"配置加载与组件初始化"阶段，框架会对实验引用的每个 `REGISTERED` 训练器执行以下检测流程：
+
+1. 读取 entrypoint 指向的源文件当前内容，计算其 SHA256 哈希值
+2. 与数据库中 `source_code_snapshot` 字段存储的快照内容对比
+3. **若哈希一致**：无操作，继续加载
+4. **若哈希不一致**，触发重新注册流程：
+   a. 取旧快照内容的 SHA256 前 8 位作为版本标识符 `<hash8>`（确保同一旧版本永远映射到同一后缀，操作幂等）
+   b. 将旧记录的 `name` 重命名为 `<original-name>_<hash8>`，并将 `is_obsolete` 置为 `1`
+   c. 以原始名称创建新记录，写入更新后的源码快照，`model_type` 保持 `REGISTERED`，`is_obsolete = 0`
+   d. 在日志中输出 INFO 提示：`检测到训练器 <name> 源码已变更，旧版本已归档为 <name>_<hash8>，已自动重新注册`
+
+过时（`is_obsolete = 1`）的训练器记录在 `uesf trainer list` 默认输出中隐藏，可通过 `--show-obsolete` 参数显示。历史实验记录的 `trainer_id` 外键仍指向对应的旧版本记录，保证可追溯性不受影响。
