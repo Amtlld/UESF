@@ -22,6 +22,8 @@
 | 05-02 | [实验执行流程](05_workflows/02_experiment_workflow.md) | 实验从配置加载到结果保存的完整流程 |
 | 06 | [CLI 接口参考](06_cli_reference.md) | 全部命令行接口的完整文档 |
 | 07 | [技术选型](07_tech_stack.md) | Python、PyTorch、SQLite 等技术的选用理由 |
+| 08 | [异常处理与日志诊断体系设计](08_exception_and_logging.md) | 统一异常结构、三级日志架构与 CLI 诊断工具（如干运行机制） |
+| 09 | [测试与质量保证策略](09_testing_and_qa.md) | 基于 Pytest 的体系化测试策略（单元/集成/E2E）、完全隔离环境与确定性保障 |
 
 ## 相关文档
 
