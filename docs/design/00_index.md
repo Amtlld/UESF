@@ -16,6 +16,7 @@
 | 04-03 | [Model Manager 详细设计](04_components/03_model_manager.md) | 三类模型管理、BaseModel 接口规范、REGISTERED 组件自动更新机制 |
 | 04-04 | [Trainer Manager 详细设计](04_components/04_trainer_manager.md) | 三类训练器管理、BaseTrainer 接口规范、REGISTERED 组件自动更新机制 |
 | 04-05 | [Experiment Manager 详细设计](04_components/05_experiment_manager.md) | 控制反转、实验配置语法、三类评估指标管理、Metric 接口规范 |
+| 04-06 | [Preprocessing Pipeline 详细设计](04_components/06_preprocessing_pipeline.md) | 预处理流的列表化架构、懒加载内存优化策略与内置去除伪迹算子 |
 | 05-01 | [预处理流程](05_workflows/01_preprocessing_workflow.md) | 数据预处理的完整执行步骤 |
 | 05-02 | [实验执行流程](05_workflows/02_experiment_workflow.md) | 实验从配置加载到结果保存的完整流程 |
 | 06 | [CLI 接口参考](06_cli_reference.md) | 全部命令行接口的完整文档 |

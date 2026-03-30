@@ -50,6 +50,13 @@ datasets:
       train_ratio: <float>   
       val_ratio: <float>
       test_ratio: <float>
+      
+    # [新增设计]: 可直接挂载针对当前 Dataset 实例的在线变换结构（如Z-Score）
+    transforms:
+      - name: <transform-name> # 例如 "zscore_normalize"
+        fit_on: "train"        # 强制仅在目标划分相（如 train折）计算数据集统计量
+        apply_to: "all"        # 随后用算出的一致规则覆盖预处理 train, val, test
+        params: { ... }
 
   # ... 多源域时可继续挂载 <dataset-alias-B>
   
