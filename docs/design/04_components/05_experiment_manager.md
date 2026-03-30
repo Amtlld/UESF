@@ -73,14 +73,17 @@ dataloaders:
 
 # ====== 训练超参数 (Overrides) ======
 # 注意：若 Trainer.configure_optimizers() 返回了非 None 值，
-#       下方 optimizer / learning_rate / weight_decay / scheduler 将被忽略，
+#       下方 optimizer / scheduler 将被忽略，
 #       系统会在日志中发出 Warning 提示。
 training:
   epochs: <int>
   batch_size: <int>
-  learning_rate: <float>
-  optimizer: <optimizer>          # 优化器名称，如 "adam", "sgd", "adamw" 等。仅支持 PyTorch 内置优化器，名称到具体类的映射规则由另外的文档说明。若需自定义优化器，用户可通过继承 BaseTrainer 并重写 configure_optimizers() 方法实现
-  weight_decay: <float>           # (可选) 权重衰减系数，默认 0.0
+  optimizer:
+    name: <optimizer-name>        # 优化器名称，如 "adam", "sgd" 等。名称映射与透传规则由“内置优化器与调度器映射规则”规范说明。
+    params:                       # 优化器参数字典，严格对照 PyTorch 官方 API 的参数名（必须包含 lr）
+      lr: <float>                 # 学习率
+      weight_decay: <float>       # (可选) 权重衰减系数，默认 0.0
+      # ... 您可以根据 PyTorch 文档在此挂载 betas, momentum 等同名参数
   gradient_clip:                  # (可选) 梯度裁剪配置
     max_norm: <float>             # 梯度最大范数，如 1.0
     norm_type: <int>              # (可选) 范数类型，默认 2

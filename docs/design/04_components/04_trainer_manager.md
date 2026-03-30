@@ -60,7 +60,7 @@ class BaseTrainer:
         该优化器实例同样会作为 optimizer 参数传入 training_step()。
 
         若此方法返回 None（默认行为），系统将回退使用 YAML 配置中的
-        training.optimizer / training.learning_rate 等字段构建优化器，
+        training.optimizer (含 name 和 params 字典参数) 字段构建优化器，
         并将其传入 training_step()。
 
         :return: (optimizer, scheduler) 元组，或 None
