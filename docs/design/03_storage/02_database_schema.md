@@ -23,12 +23,13 @@ CREATE TABLE raw_datasets (
     label_key TEXT NOT NULL,    -- .mat文件中标签存储的键名（如 "label"）
     n_subjects INTEGER,
     sampling_rate REAL,
-    n_recordings INTEGER,
+    n_sessions INTEGER,
+    n_recordings INTEGER, -- 允许原始数据集的"recording"维度置为1（未切分）
     n_channels INTEGER,
     n_samples INTEGER,
     electrode_list TEXT, -- JSON对象，各通道对应的导联，是字符串列表
-    data_shape TEXT, -- JSON对象，表示数组形状的列表，是整数列表，如 [5, 32, 500]。由系统在注册/导入时自动推断，推断时需校验各被试.mat文件的data_shape是否一致
-    dimension_info TEXT NOT NULL, -- JSON对象，字符串列表，表示各维度对应的数据意义，如 ["record", "channel", "sample"]。必须由用户指明
+    data_shape TEXT, -- JSON对象，表示数组形状的列表，是整数列表，如 [5, 1, 32, 500]。由系统在注册/导入时自动推断，推断时需校验各被试.mat文件的data_shape是否一致
+    dimension_info TEXT NOT NULL, -- JSON对象，字符串列表，表示各维度对应的数据意义，如 ["session", "recording", "channel", "sample"]。必须由用户指明
     label_shape TEXT, -- 由系统在注册/导入时自动推断，推断时需校验各被试.mat文件的label_shape是否一致
     numeric_to_semantic TEXT NOT NULL, -- 以JSON对象形式存储的数字标签与字符串语义标签的映射关系（如 {"0": "angry", "1": "happy"}）。必须由用户指明，取代旧的 categories 字段，作为标签类别的唯一定义来源
     raw_info_snapshot TEXT, -- 从用户的raw.yml提取转化的JSON对象快照
@@ -50,12 +51,13 @@ CREATE TABLE preprocessed_datasets (
     data_dir_path TEXT, -- 数据集路径
     n_subjects INTEGER,
     sampling_rate REAL,
+    n_sessions INTEGER,
     n_recordings INTEGER,
     n_channels INTEGER,
     n_samples INTEGER,
     electrode_list TEXT, -- JSON对象，各通道对应的导联，是字符串列表
-    data_shape TEXT, -- JSON对象，表示数组形状的列表，是整数列表，如 [10, 5, 32, 500]。由系统在预处理完成后自动推断
-    dimension_info TEXT NOT NULL DEFAULT '["subject", "recording", "channel", "sample"]', -- JSON对象，字符串列表，表示各维度对应的数据意义。原则上固定为 ["subject", "recording", "channel", "sample"]，由预处理模块通过必要的数组结构调整保证维度语义正确。保留此字段以支持未来扩展
+    data_shape TEXT, -- JSON对象，表示数组形状的列表，是整数列表，如 [10, 2, 5, 32, 500]。由系统在预处理完成后自动推断
+    dimension_info TEXT NOT NULL DEFAULT '["subject", "session", "recording", "channel", "sample"]', -- JSON对象，字符串列表，表示各维度对应的数据意义。原则上固定为 ["subject", "session", "recording", "channel", "sample"]，由预处理模块通过必要的数组结构调整保证维度语义正确。保留此字段以支持未来扩展
     label_shape TEXT, -- 由系统在预处理完成后自动推断
     numeric_to_semantic TEXT NOT NULL, -- 以JSON对象形式存储的数字标签与字符串语义标签的映射关系（如 {"0": "angry", "1": "happy"}）。继承自源原始数据集或通过预处理管线中的标签处理模块重新定义
     preprocess_config_snapshot TEXT, -- 预处理时输入的preprocess.yml转化的JSON形式配置快照

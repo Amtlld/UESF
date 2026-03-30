@@ -40,7 +40,7 @@ datasets:
     name: <preprocessed-dataset-name-1> 
     split:
       strategy: <strategy>   # "holdout" 或 "k-fold"
-      dimension: <dimension> # "subject", "dataset", "record", 或 "none"
+      dimension: <dimension> # "subject", "dataset", "session", 或 "none"
       
       # [k-fold 专有]:
       k-folds: <int>         # 若为 "total" 或 -1 则表示留一法 (LOOCV)

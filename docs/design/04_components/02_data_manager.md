@@ -32,11 +32,12 @@ raw:
   label_key: <key>           # (必填) .mat文件中标签存储的键名，如 "label"
   sampling_rate: <sampling-rate>
   n_subjects: <number-of-subjects>
-  n_recordings: <number-of-recordings>
+  n_sessions: <number-of-sessions>
+  n_recordings: <number-of-recordings> # 若未切分，该维度允许为1
   n_channels: <number-of-channels>
   n_samples: <number-of-samples>
   electrode_list: <list-of-electrodes>
-  dimension_info: <list>     # (必填) 各维度对应的数据意义，如 ["record", "channel", "sample"]
+  dimension_info: <list>     # (必填) 各维度对应的数据意义，如 ["session", "recording", "channel", "sample"]
   numeric_to_semantic:             # (必填) 数字标签与语义标签的映射，取代旧的 n_classes 字段
     0: <label-name>          # 如 0: "angry"
     1: <label-name>          # 如 1: "happy"
