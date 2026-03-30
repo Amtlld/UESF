@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -15,6 +16,7 @@ from uesf.core.database import DatabaseManager
 from uesf.core.exceptions import UESFException
 from uesf.core.logging import setup_logging
 from uesf.managers.data_manager import DataManager
+from uesf.pipeline.preprocessor import Preprocessor, parse_preprocess_yml
 
 console = Console()
 
@@ -188,6 +190,138 @@ def raw_info(
                 table.add_row(key, str(val))
 
         console.print(table)
+    except UESFException as exc:
+        console.print(_format_uesf_error(exc))
+        raise typer.Exit(code=1)
+
+
+# ── Preprocess commands ─────────────────────────────────────────────
+
+preprocess_app = typer.Typer(name="preprocess", help="Run preprocessing pipeline.", no_args_is_help=True)
+data_app.add_typer(preprocess_app, name="preprocess")
+
+
+@preprocess_app.command("run")
+def preprocess_run(
+    config_path: Path = typer.Option(
+        "preprocess.yml", "--config-path", "-c",
+        help="Path to preprocess.yml",
+    ),
+    dataset: str | None = typer.Option(None, "--dataset", "-d", help="Source raw dataset name (overrides YAML)"),
+    out_name: str | None = typer.Option(None, "--out-name", "-o", help="Output preprocessed dataset name"),
+) -> None:
+    """Execute a preprocessing pipeline."""
+    try:
+        setup_logging()
+        db = DatabaseManager()
+        db.initialize()
+        config = ConfigManager(db)
+        preprocessor = Preprocessor(db, config)
+
+        preprocess_config = parse_preprocess_yml(config_path)
+
+        source = dataset or preprocess_config.get("source_dataset")
+        if not source:
+            console.print("[red]No source dataset specified. Use --dataset or set source_dataset in YAML.[/red]")
+            raise typer.Exit(code=1)
+
+        name = out_name or preprocess_config.get("out_name", f"{source}_preprocessed")
+
+        record = preprocessor.run(preprocess_config, source, name)
+        console.print(f"[green]Preprocessing complete: '{record['name']}' (shape: {record['data_shape']})[/green]")
+    except UESFException as exc:
+        console.print(_format_uesf_error(exc))
+        raise typer.Exit(code=1)
+
+
+# ── Preprocessed dataset commands ───────────────────────────────────
+
+preprocessed_app = typer.Typer(name="preprocessed", help="Manage preprocessed datasets.", no_args_is_help=True)
+data_app.add_typer(preprocessed_app, name="preprocessed")
+
+
+@preprocessed_app.command("list")
+def preprocessed_list() -> None:
+    """List all preprocessed datasets."""
+    try:
+        manager = _get_manager()
+        datasets = manager.list_preprocessed()
+
+        if not datasets:
+            console.print("[dim]No preprocessed datasets.[/dim]")
+            return
+
+        table = Table(title="Preprocessed Datasets", show_header=True)
+        table.add_column("Name", style="cyan")
+        table.add_column("Source Raw")
+        table.add_column("Shape")
+        table.add_column("Orphan", justify="center")
+
+        for ds in datasets:
+            source_name = "?"
+            if ds["source_raw_dataset_id"]:
+                src = manager.db.fetch_one(
+                    "SELECT name FROM raw_datasets WHERE id = ?",
+                    (ds["source_raw_dataset_id"],),
+                )
+                if src:
+                    source_name = src["name"]
+            table.add_row(
+                ds["name"],
+                source_name if not ds["is_orphan"] else f"{source_name} (orphan)",
+                ds.get("data_shape", "?"),
+                "Yes" if ds["is_orphan"] else "No",
+            )
+
+        console.print(table)
+    except UESFException as exc:
+        console.print(_format_uesf_error(exc))
+        raise typer.Exit(code=1)
+
+
+@preprocessed_app.command("remove")
+def preprocessed_remove(
+    name: str = typer.Argument(help="Name of the preprocessed dataset to remove"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+) -> None:
+    """Remove a preprocessed dataset."""
+    try:
+        manager = _get_manager()
+        if not yes and not typer.confirm(f"Remove preprocessed dataset '{name}' and all dependent masked datasets?"):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+        manager.remove_preprocessed(name)
+        console.print(f"[green]Removed preprocessed dataset '{name}'[/green]")
+    except UESFException as exc:
+        console.print(_format_uesf_error(exc))
+        raise typer.Exit(code=1)
+
+
+@preprocessed_app.command("mask")
+def preprocessed_mask(
+    source: str = typer.Argument(help="Source preprocessed dataset name"),
+    out_name: str = typer.Option(..., "--out-name", "-o", help="Name for the masked dataset"),
+    mapping_file: Path = typer.Option(..., "--mapping-file", "-m", help="YAML file with label mapping"),
+) -> None:
+    """Create a masked (label-remapped) dataset."""
+    try:
+        manager = _get_manager()
+
+        with open(mapping_file, encoding="utf-8") as f:
+            mapping_data = yaml.safe_load(f)
+
+        if not isinstance(mapping_data, dict):
+            console.print("[red]Mapping file must contain a YAML dict.[/red]")
+            raise typer.Exit(code=1)
+
+        label_mapping = {str(k): str(v) for k, v in mapping_data.items()}
+
+        record = manager.create_masked(source, out_name, label_mapping)
+        console.print(
+            f"[green]Created masked dataset '{record['name']}' "
+            f"({record['n_classes']} classes)[/green]"
+        )
     except UESFException as exc:
         console.print(_format_uesf_error(exc))
         raise typer.Exit(code=1)

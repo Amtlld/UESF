@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 from scipy.io import loadmat
 
@@ -379,3 +380,139 @@ class DataManager:
 
         assert data_shape is not None and label_shape is not None
         return data_shape, label_shape
+
+    # ── Preprocessed Dataset Operations ─────────────────────────────────
+
+    def list_preprocessed(self) -> list[dict[str, Any]]:
+        """List all preprocessed datasets."""
+        return self.db.fetch_all("SELECT * FROM preprocessed_datasets ORDER BY name")
+
+    def get_preprocessed(self, name: str) -> dict[str, Any]:
+        """Get a preprocessed dataset record by name."""
+        row = self.db.fetch_one("SELECT * FROM preprocessed_datasets WHERE name = ?", (name,))
+        if row is None:
+            raise DatasetNotFoundError(
+                f"Preprocessed dataset '{name}' not found",
+                hint="Run 'uesf data preprocessed list' to see available datasets.",
+            )
+        return row
+
+    def remove_preprocessed(self, name: str) -> None:
+        """Remove a preprocessed dataset and its dependent masked datasets."""
+        record = self.get_preprocessed(name)
+
+        with self.db.transaction() as cursor:
+            # Delete dependent masked datasets
+            masked_rows = cursor.execute(
+                "SELECT data_dir_path FROM masked_datasets WHERE source_dataset_id = ?",
+                (record["id"],),
+            ).fetchall()
+            for masked in masked_rows:
+                if masked["data_dir_path"]:
+                    masked_dir = Path(masked["data_dir_path"])
+                    if masked_dir.exists():
+                        shutil.rmtree(masked_dir)
+            cursor.execute("DELETE FROM masked_datasets WHERE source_dataset_id = ?", (record["id"],))
+
+            # Delete preprocessed data files
+            if record["data_dir_path"]:
+                prep_dir = Path(record["data_dir_path"])
+                if prep_dir.exists():
+                    shutil.rmtree(prep_dir)
+
+            cursor.execute("DELETE FROM preprocessed_datasets WHERE id = ?", (record["id"],))
+
+        logger.info("Removed preprocessed dataset '%s'", name)
+
+    # ── Masked Dataset Operations ───────────────────────────────────────
+
+    def create_masked(
+        self, source_name: str, out_name: str, label_mapping: dict[str, str],
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a masked (label-remapped) dataset.
+
+        Args:
+            source_name: Name of the source preprocessed dataset.
+            out_name: Name for the new masked dataset.
+            label_mapping: Old semantic label -> new semantic label mapping.
+            description: Optional description.
+
+        Returns:
+            The masked dataset DB record.
+        """
+        source = self.get_preprocessed(source_name)
+        source_n2s = json.loads(source["numeric_to_semantic"])
+
+        # Compute new numeric_to_semantic: new semantic labels sorted by ASCII
+        new_semantics = sorted(set(label_mapping.values()))
+        new_n2s = {str(i): s for i, s in enumerate(new_semantics)}
+        # Reverse map: new_semantic -> new_numeric
+        semantic_to_new_numeric = {s: i for i, s in enumerate(new_semantics)}
+
+        # Build old_numeric -> new_numeric mapping
+        old_to_new = {}
+        for old_num_str, old_sem in source_n2s.items():
+            if old_sem in label_mapping:
+                new_sem = label_mapping[old_sem]
+                old_to_new[int(old_num_str)] = semantic_to_new_numeric[new_sem]
+
+        # Load source labels and remap
+        source_dir = Path(source["data_dir_path"])
+        labels = np.load(str(source_dir / "labels.npy"))
+
+        new_labels = np.copy(labels)
+        for old_val, new_val in old_to_new.items():
+            new_labels[labels == old_val] = new_val
+
+        # Save remapped labels
+        out_dir = self.config.get_data_dir() / "masked" / out_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.save(str(out_dir / "labels.npy"), new_labels)
+
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                """INSERT INTO masked_datasets
+                   (name, description, source_dataset_id, data_dir_path,
+                    label_mapping, numeric_to_semantic, n_classes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    out_name,
+                    description,
+                    source["id"],
+                    str(out_dir),
+                    json.dumps(label_mapping),
+                    json.dumps(new_n2s),
+                    len(new_semantics),
+                ),
+            )
+
+        logger.info("Created masked dataset '%s' from '%s' (%d classes)", out_name, source_name, len(new_semantics))
+        return self.db.fetch_one("SELECT * FROM masked_datasets WHERE name = ?", (out_name,))
+
+    def list_masked(self) -> list[dict[str, Any]]:
+        """List all masked datasets."""
+        return self.db.fetch_all("SELECT * FROM masked_datasets ORDER BY name")
+
+    def get_masked(self, name: str) -> dict[str, Any]:
+        """Get a masked dataset record by name."""
+        row = self.db.fetch_one("SELECT * FROM masked_datasets WHERE name = ?", (name,))
+        if row is None:
+            raise DatasetNotFoundError(
+                f"Masked dataset '{name}' not found",
+                hint="Run 'uesf data masked list' to see available datasets.",
+            )
+        return row
+
+    def remove_masked(self, name: str) -> None:
+        """Remove a masked dataset."""
+        record = self.get_masked(name)
+
+        if record["data_dir_path"]:
+            masked_dir = Path(record["data_dir_path"])
+            if masked_dir.exists():
+                shutil.rmtree(masked_dir)
+
+        self.db.execute("DELETE FROM masked_datasets WHERE id = ?", (record["id"],))
+        self.db.commit()
+        logger.info("Removed masked dataset '%s'", name)
