@@ -9,3 +9,4 @@ build/
 *.npy
 *.mat
 .venv/
+uv.lock
