@@ -6,7 +6,6 @@ provides a transaction context manager for atomic operations.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -203,7 +202,9 @@ class DatabaseManager:
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         if db_path is None:
-            uesf_home = Path(os.environ.get("UESF_HOME", Path.home() / ".uesf"))
+            from uesf.core import get_uesf_home
+
+            uesf_home = get_uesf_home()
             uesf_home.mkdir(parents=True, exist_ok=True)
             db_path = uesf_home / "uesf.db"
 

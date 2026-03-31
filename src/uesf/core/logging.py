@@ -18,7 +18,9 @@ _initialized = False
 
 
 def _get_uesf_home() -> Path:
-    return Path(os.environ.get("UESF_HOME", Path.home() / ".uesf"))
+    from uesf.core import get_uesf_home
+
+    return get_uesf_home()
 
 
 def setup_logging(log_level: str = "INFO") -> None:

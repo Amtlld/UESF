@@ -27,7 +27,11 @@ class ConfigManager:
 
     def __init__(self, db: DatabaseManager, uesf_home: Path | None = None) -> None:
         self.db = db
-        self.uesf_home = uesf_home or Path(os.environ.get("UESF_HOME", Path.home() / ".uesf"))
+        if uesf_home is None:
+            from uesf.core import get_uesf_home
+
+            uesf_home = get_uesf_home()
+        self.uesf_home = uesf_home
         self._config_file = self.uesf_home / "config.yml"
 
     def _load_db_defaults(self) -> dict[str, str]:

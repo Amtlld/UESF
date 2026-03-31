@@ -2,6 +2,18 @@
 
 本文档定义 UESF 管理的所有文件与目录的物理存储布局。数据库表结构详见 [数据库 Schema 设计](02_database_schema.md)。
 
+## 0. UESF Home 目录解析
+
+UESF 的全局目录（`<uesf-home>`）按以下优先级解析：
+
+| 优先级 | 来源 | 路径 |
+|--------|------|------|
+| 1（最高） | 环境变量 `UESF_HOME` | 用户显式指定的路径 |
+| 2 | 虚拟环境自动检测 | `$VIRTUAL_ENV/.uesf` |
+| 3（回退） | 用户主目录 | `~/.uesf` |
+
+> **建议**：使用一个专用的虚拟环境来安装和运行 UESF。注册的模型、训练器等 `.py` 组件依赖当前虚拟环境中安装的包（如 PyTorch），在不同虚拟环境之间共享这些组件可能导致导入失败或行为不一致。
+
 ## 1. UESF 管理的文件目录设计
 
 ### 1.1 UESF 管理的数据集
@@ -56,13 +68,13 @@ UESF 管理的预处理数据集存放在 `<data-dir>/preprocessed` 目录下。
 
 ### 1.2 训练器
 
-UESF 支持用户自定义训练器，并将其注册为 UESF 管理的全局训练器。全局训练器存放在 `~/.uesf/trainer` 目录下的 `<trainer_name>.py` 文件中。
+UESF 支持用户自定义训练器，并将其注册为 UESF 管理的全局训练器。全局训练器存放在 `<uesf-home>/trainer` 目录下的 `<trainer_name>.py` 文件中。
 
 > 数据库中的存储结构详见 [`trainers` 表](02_database_schema.md#trainers-表)。
 
 ### 1.3 模型
 
-UESF 支持用户自定义模型，并将其注册为 UESF 管理的全局模型。UESF 管理的全局模型存放在 `~/.uesf/models` 目录下的 `<model_name>.py` 文件中。
+UESF 支持用户自定义模型，并将其注册为 UESF 管理的全局模型。UESF 管理的全局模型存放在 `<uesf-home>/models` 目录下的 `<model_name>.py` 文件中。
 
 > 数据库中的存储结构详见 [`models` 表](02_database_schema.md#models-表)。
 

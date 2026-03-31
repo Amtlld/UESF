@@ -29,6 +29,7 @@ def uesf_home(tmp_path, monkeypatch):
     home = tmp_path / ".uesf"
     home.mkdir()
     monkeypatch.setenv("UESF_HOME", str(home))
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     return home
 
 
