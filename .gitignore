@@ -13,3 +13,4 @@ uv.lock
 docs/homework/
 docs/implementation_log/
 docs/legacy/
+tmp/

@@ -82,6 +82,13 @@ class Preprocessor:
         eeg_data_key = raw_record["eeg_data_key"]
         label_key = raw_record["label_key"]
 
+        # Determine which canonical dims are missing from the raw data
+        # Canonical per-subject shape: (sessions, recordings, channels, samples)
+        canonical_dims = ["session", "recording", "channel", "sample"]
+        raw_dimension_info = json.loads(raw_record.get("dimension_info") or "[]")
+        n_sessions_meta = raw_record["n_sessions"] or 1
+        n_recordings_meta = raw_record["n_recordings"] or 1
+
         all_data = []
         all_labels = []
 
@@ -93,6 +100,21 @@ class Preprocessor:
                 mat_data = loadmat(str(mat_file), squeeze_me=False)
                 subject_data = np.array(mat_data[eeg_data_key], dtype=np.float32)
                 subject_labels = np.array(mat_data[label_key], dtype=np.int64)
+
+                # Expand data to canonical shape (sessions, recordings, channels, samples)
+                # by inserting size-1 axes for dims absent in dimension_info
+                current_dims = list(raw_dimension_info)
+                for i, dim in enumerate(canonical_dims):
+                    if dim not in current_dims:
+                        subject_data = np.expand_dims(subject_data, axis=i)
+                        current_dims.insert(i, dim)
+
+                # Normalize labels to (n_sessions, n_recordings) or (n_sessions,)
+                # MATLAB row vectors load as (1, n); reshape to (n_sessions, n_recordings)
+                if subject_labels.size == n_sessions_meta * n_recordings_meta:
+                    subject_labels = subject_labels.reshape(n_sessions_meta, n_recordings_meta)
+                    if n_recordings_meta == 1:
+                        subject_labels = subject_labels.squeeze(-1)  # -> (n_sessions,)
 
                 # Apply data stream operators
                 current_sr = sampling_rate
