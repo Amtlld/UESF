@@ -8,9 +8,8 @@ UESF 的全局目录（`<uesf-home>`）按以下优先级解析：
 
 | 优先级 | 来源 | 路径 |
 |--------|------|------|
-| 1（最高） | 环境变量 `UESF_HOME` | 用户显式指定的路径 |
-| 2 | 虚拟环境自动检测 | `$VIRTUAL_ENV/.uesf` |
-| 3（回退） | 用户主目录 | `~/.uesf` |
+| 1（最高） | 虚拟环境自动检测 | `$VIRTUAL_ENV/.uesf` |
+| 2（回退） | 用户主目录 | `~/.uesf` |
 
 > **推荐安装方式**：创建一个持久化的专用虚拟环境，将 UESF 与所有研究依赖（PyTorch 等）安装在同一环境中，并将该环境固定用于所有 UESF 操作：
 > ```bash
@@ -18,7 +17,7 @@ UESF 的全局目录（`<uesf-home>`）按以下优先级解析：
 > source ~/envs/eeg-research/bin/activate
 > uv pip install uesf torch numpy ...
 > ```
-> 此后每次使用 `uesf` CLI 前激活该环境即可。`UESF_HOME` 将自动解析为 `~/envs/eeg-research/.uesf`。
+> 此后每次使用 `uesf` CLI 前激活该环境即可。`<uesf-home>` 将自动解析为 `~/envs/eeg-research/.uesf`。
 >
 > **不要使用 `uv tool install uesf`**。`uv tool` 会将 UESF 安装到一个隔离的工具环境中，该环境不含 PyTorch 等研究依赖。注册的 `model.py` / `trainer.py` 在运行时需要动态 `import` 这些包，工具环境无法满足该需求。
 

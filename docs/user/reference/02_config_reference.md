@@ -4,7 +4,7 @@ UESF 使用 4 种配置文件，本文档列出每种配置文件的完整字段
 
 ---
 
-## 1. 全局配置文件（`~/.uesf/config.yml`）
+## 1. 全局配置文件（`<uesf-home>/config.yml`）
 
 由 `uesf config set` 命令修改，或手动编辑。
 
@@ -17,7 +17,7 @@ log_level: INFO
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `data_dir` | string | `~/.uesf/data` | 数据文件存储目录（`raw/`、`preprocessed/`、`masked/` 均在此目录下） |
+| `data_dir` | string | `<uesf-home>/data` | 数据文件存储目录（`raw/`、`preprocessed/`、`masked/` 均在此目录下） |
 | `default_device` | string | `cpu` | 默认计算设备（`cpu`、`cuda`、`cuda:0` 等） |
 | `num_workers` | int | 0 | DataLoader 的 worker 进程数 |
 | `log_level` | string | `INFO` | 日志级别：`DEBUG`、`INFO`、`WARNING`、`ERROR` |

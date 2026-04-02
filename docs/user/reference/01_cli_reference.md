@@ -10,7 +10,7 @@ UESF 命令行工具，主命令为 `uesf`，下设 7 个子命令组。
 
 ### uesf config show
 
-显示当前生效的全局配置（数据库默认值与 `~/.uesf/config.yml` 覆写后的合并结果）。
+显示当前生效的全局配置（数据库默认值与 `<uesf-home>/config.yml` 覆写后的合并结果）。
 
 ```bash
 uesf config show
@@ -18,7 +18,7 @@ uesf config show
 
 ### uesf config set
 
-将指定键值写入 `~/.uesf/config.yml`。
+将指定键值写入 `<uesf-home>/config.yml`。
 
 ```bash
 uesf config set <KEY> <VALUE>

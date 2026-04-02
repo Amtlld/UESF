@@ -190,7 +190,7 @@ _ALL_DDL = [
 
 # Default config seed data
 _DEFAULT_CONFIGS = [
-    ("data_dir", "~/.uesf/data", "UESF-managed datasets storage directory"),
+    ("data_dir", "<uesf-home>/data", "UESF-managed datasets storage directory"),
     ("default_device", "cpu", "Default compute device (e.g., cpu, cuda:0)"),
     ("num_workers", "4", "DataLoader worker processes"),
     ("log_level", "INFO", "Framework logging level (DEBUG, INFO, WARNING, ERROR)"),

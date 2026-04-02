@@ -11,7 +11,7 @@ class TestConfigDefaults:
     def test_get_all_returns_defaults(self, db, uesf_home):
         mgr = ConfigManager(db, uesf_home)
         config = mgr.get_all()
-        assert config["data_dir"] == "~/.uesf/data"
+        assert config["data_dir"] == str(uesf_home / "data")
         assert config["default_device"] == "cpu"
         assert config["num_workers"] == "4"
         assert config["log_level"] == "INFO"
@@ -36,7 +36,7 @@ class TestConfigFileOverride:
         assert config["default_device"] == "cuda:0"
         assert config["num_workers"] == "8"
         # Unset keys retain defaults
-        assert config["data_dir"] == "~/.uesf/data"
+        assert config["data_dir"] == str(uesf_home / "data")
         assert config["log_level"] == "INFO"
 
     def test_unknown_key_in_file_ignored(self, db, uesf_home):
@@ -98,8 +98,7 @@ class TestConfigSet:
 class TestGetDataDir:
     def test_default_data_dir(self, db, uesf_home):
         mgr = ConfigManager(db, uesf_home)
-        data_dir = mgr.get_data_dir()
-        assert str(data_dir).endswith(".uesf/data")
+        assert mgr.get_data_dir() == uesf_home / "data"
 
     def test_custom_data_dir(self, db, uesf_home):
         mgr = ConfigManager(db, uesf_home)

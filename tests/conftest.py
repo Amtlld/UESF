@@ -23,13 +23,12 @@ def _reset_logging():
 def uesf_home(tmp_path, monkeypatch):
     """Provide an isolated UESF home directory.
 
-    Sets UESF_HOME env var to a temp directory so tests never
-    touch the real ~/.uesf.
+    Sets VIRTUAL_ENV to a temp directory so get_uesf_home() returns
+    tmp_path/.uesf, ensuring tests never touch the real ~/.uesf.
     """
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
     home = tmp_path / ".uesf"
     home.mkdir()
-    monkeypatch.setenv("UESF_HOME", str(home))
-    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     return home
 
 

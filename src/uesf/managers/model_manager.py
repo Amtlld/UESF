@@ -35,7 +35,7 @@ class ModelManager:
     ) -> dict[str, Any]:
         """Add a global model from a source file.
 
-        Copies the source file to ~/.uesf/models/ and stores a source code snapshot.
+        Copies the source file to <uesf-home>/models/ and stores a source code snapshot.
 
         Args:
             source_path: Path to the Python file containing the model class.

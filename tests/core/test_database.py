@@ -33,7 +33,7 @@ class TestDatabaseInitialization:
 
     def test_default_config_values(self, db):
         configs = {r["key"]: r["value"] for r in db.fetch_all("SELECT key, value FROM configs")}
-        assert configs["data_dir"] == "~/.uesf/data"
+        assert configs["data_dir"] == "<uesf-home>/data"
         assert configs["default_device"] == "cpu"
         assert configs["num_workers"] == "4"
         assert configs["log_level"] == "INFO"

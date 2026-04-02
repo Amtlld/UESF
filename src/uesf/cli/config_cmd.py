@@ -54,7 +54,7 @@ def config_set(
     key: str = typer.Argument(help="Config key to set"),
     value: str = typer.Argument(help="Config value"),
 ) -> None:
-    """Set a global configuration value (writes to ~/.uesf/config.yml)."""
+    """Set a global configuration value (writes to <uesf-home>/config.yml)."""
     try:
         manager = _get_manager()
         manager.set(key, value)

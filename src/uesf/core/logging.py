@@ -2,7 +2,7 @@
 
 Provides a dual-channel logging architecture:
 - ConsoleHandler: Rich-formatted terminal output, respects user log_level
-- GlobalFileHandler: Rotating file at ~/.uesf/logs/uesf.log, captures DEBUG+
+- GlobalFileHandler: Rotating file at <uesf-home>/logs/uesf.log, captures DEBUG+
 """
 
 from __future__ import annotations

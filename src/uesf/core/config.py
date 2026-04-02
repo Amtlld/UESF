@@ -2,7 +2,7 @@
 
 Implements a two-layer config mechanism:
 1. Database `configs` table stores read-only defaults
-2. ~/.uesf/config.yml file overrides defaults (higher priority)
+2. <uesf-home>/config.yml file overrides defaults (higher priority)
 """
 
 from __future__ import annotations
@@ -70,6 +70,11 @@ class ConfigManager:
         config = self._load_db_defaults()
         overrides = self._load_file_overrides()
         config.update({k: str(v) for k, v in overrides.items()})
+
+        # data_dir default is dynamic: <uesf-home>/data
+        if "data_dir" not in overrides:
+            config["data_dir"] = str(self.uesf_home / "data")
+
         return config
 
     def get(self, key: str) -> str:

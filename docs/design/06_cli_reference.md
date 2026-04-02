@@ -8,9 +8,9 @@ UESF 提供了清晰的命令行接口 (CLI)。针对不同的管理层级，命
 
 ## 1. 全局系统设置
 
-用于查看和修改 UESF 框架的全局配置参数。全局配置的数据库默认值不可更改，所有用户自定义覆写通过 `~/.uesf/config.yml` 文件完成。配置机制详见 [全局配置机制](03_storage/03_global_config.md)。
+用于查看和修改 UESF 框架的全局配置参数。全局配置的数据库默认值不可更改，所有用户自定义覆写通过 `<uesf-home>/config.yml` 文件完成。配置机制详见 [全局配置机制](03_storage/03_global_config.md)。
 
-- `uesf config set <KEY> <VALUE>`: 将指定的全局配置键值写入 `~/.uesf/config.yml`。仅允许设置合法键名（`data_dir`, `default_device`, `num_workers`, `log_level`），若键名不合法则报错。例如：`uesf config set default_device cuda:0`。
+- `uesf config set <KEY> <VALUE>`: 将指定的全局配置键值写入 `<uesf-home>/config.yml`。仅允许设置合法键名（`data_dir`, `default_device`, `num_workers`, `log_level`），若键名不合法则报错。例如：`uesf config set default_device cuda:0`。
 - `uesf config show`: 在终端显示当前生效的全局配置（合并数据库默认值与 `config.yml` 覆写后的最终结果）。
 
 ## 2. 数据管理命令 (`uesf data`)
