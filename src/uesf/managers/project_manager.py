@@ -180,12 +180,17 @@ class ProjectManager:
 
             # Check if name shadows a global or embedded component
             table = _component_type_to_table(component_type)
-            existing = self.db.fetch_one(f"SELECT name FROM {table} WHERE name = ?", (name,))
+            type_col = _component_type_column(component_type)
+            existing = self.db.fetch_one(
+                f"SELECT {type_col} FROM {table} WHERE name = ? AND {type_col} IN ('GLOBAL', 'EMBEDDED')",
+                (name,),
+            )
             if existing:
                 logger.warning(
-                    "Project-level %s '%s' shadows a global/embedded component with the same name",
+                    "Project-level %s '%s' shadows a %s component with the same name",
                     component_type.rstrip("s"),
                     name,
+                    existing[type_col].lower(),
                 )
 
             return {"source": "PROJECT", "name": name, "entrypoint": entrypoint}

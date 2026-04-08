@@ -189,7 +189,7 @@ class ExperimentManager:
         self._update_status(exp_record_id, "RUNNING")
 
         try:
-            results = self._execute(project_dir, project_config, exp_config, experiment_name)
+            results = self._execute(project_dir, project_config, exp_config, experiment_name, exp_record_id)
 
             self._update_status(exp_record_id, "COMPLETED", results=results)
             logger.info("Experiment '%s' completed successfully", experiment_name)
@@ -206,6 +206,7 @@ class ExperimentManager:
         project_config: dict,
         exp_config: dict,
         experiment_name: str,
+        exp_record_id: int,
     ) -> dict[str, Any]:
         """Internal execution logic."""
         seed = exp_config.get("seed", 42)
@@ -225,6 +226,23 @@ class ExperimentManager:
             model_name, "models", project_config, project_dir,
         )
 
+        # Register or detect source changes for project-level model
+        model_id = None
+        if model_resolution["source"] == "PROJECT" and model_resolution.get("entrypoint"):
+            entrypoint = model_resolution["entrypoint"]
+            try:
+                self.model_manager.get(model_name)
+                model_record = self.model_manager.detect_and_reregister(
+                    model_name, entrypoint, project_dir,
+                )
+            except ComponentNotFoundError:
+                model_record = self.model_manager.register(
+                    model_name, entrypoint, project_dir,
+                )
+            model_id = model_record["id"]
+        elif model_resolution.get("record"):
+            model_id = model_resolution["record"]["id"]
+
         # Load model class and get dataset info for auto-injection
         model_cls = self.model_manager.load_class(
             model_name,
@@ -240,6 +258,24 @@ class ExperimentManager:
         trainer_resolution = self.project_manager.resolve_component(
             trainer_name, "trainers", project_config, project_dir,
         )
+
+        # Register or detect source changes for project-level trainer
+        trainer_id = None
+        if trainer_resolution["source"] == "PROJECT" and trainer_resolution.get("entrypoint"):
+            entrypoint = trainer_resolution["entrypoint"]
+            try:
+                self.trainer_manager.get(trainer_name)
+                trainer_record = self.trainer_manager.detect_and_reregister(
+                    trainer_name, entrypoint, project_dir,
+                )
+            except ComponentNotFoundError:
+                trainer_record = self.trainer_manager.register(
+                    trainer_name, entrypoint, project_dir,
+                )
+            trainer_id = trainer_record["id"]
+        elif trainer_resolution.get("record"):
+            trainer_id = trainer_resolution["record"]["id"]
+
         trainer_cls = self.trainer_manager.load_class(
             trainer_name,
             entrypoint=trainer_resolution.get("entrypoint"),
@@ -250,11 +286,39 @@ class ExperimentManager:
         metric_names = eval_config.get("metrics", ["accuracy"])
         metric_funcs = {}
         for mname in metric_names:
+            metric_resolution = None
             try:
-                self.project_manager.resolve_component(mname, "metrics", project_config, project_dir)
+                metric_resolution = self.project_manager.resolve_component(
+                    mname, "metrics", project_config, project_dir,
+                )
             except ComponentNotFoundError:
                 pass
+
+            if (
+                metric_resolution
+                and metric_resolution["source"] == "PROJECT"
+                and metric_resolution.get("entrypoint")
+            ):
+                entrypoint = metric_resolution["entrypoint"]
+                try:
+                    self.metric_manager.get(mname)
+                    self.metric_manager.detect_and_reregister(
+                        mname, entrypoint, project_dir,
+                    )
+                except ComponentNotFoundError:
+                    self.metric_manager.register(
+                        mname, entrypoint, project_dir,
+                    )
+
             metric_funcs[mname] = self.metric_manager.load_metric(mname, project_dir=project_dir)
+
+        # Link component IDs to experiment record
+        self.db.execute(
+            """UPDATE experiments SET model_id = ?, trainer_id = ?,
+               updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (model_id, trainer_id, exp_record_id),
+        )
+        self.db.commit()
 
         # 4. Load datasets, split, transform, train
         datasets_config = exp_config.get("datasets", {})
