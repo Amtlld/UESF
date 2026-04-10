@@ -56,6 +56,13 @@ class HoldoutSplitter:
         self.shuffle = config.get("shuffle", True)
         self.seed = config.get("seed")
 
+        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
+        if abs(total_ratio - 1.0) > 1e-6:
+            raise ConfigError(
+                f"Split ratios must sum to 1.0, got {total_ratio:.4f}",
+                hint=f"train={self.train_ratio}, val={self.val_ratio}, test={self.test_ratio}",
+            )
+
     def split(self, data: np.ndarray) -> list[SplitResult]:
         """Split data into train/val/test sets.
 
@@ -74,8 +81,11 @@ class HoldoutSplitter:
             rng = random.Random(self.seed)
             rng.shuffle(indices)
 
-        n_train = max(1, int(n * self.train_ratio))
-        n_val = max(0, int(n * self.val_ratio))
+        n_train = max(1, round(n * self.train_ratio))
+        n_val = max(0, round(n * self.val_ratio))
+        # Clamp so train + val never exceeds n
+        if n_train + n_val > n:
+            n_val = n - n_train
 
         train_groups = [groups[i] for i in indices[:n_train]]
         val_groups = [groups[i] for i in indices[n_train:n_train + n_val]]
@@ -93,6 +103,11 @@ class KFoldSplitter:
 
     def __init__(self, config: dict[str, Any]) -> None:
         k = config.get("k-folds", config.get("k_folds", 5))
+        if k != -1 and k != "total" and (not isinstance(k, int) or k < 2):
+            raise ConfigError(
+                f"k-folds must be an integer >= 2, -1, or 'total', got {k!r}",
+                hint="Use k >= 2 for k-fold CV, or -1 / 'total' for LOOCV.",
+            )
         self.k = k
         self.dimension = config.get("dimension", "none")
         self.shuffle = config.get("shuffle", True)
@@ -161,26 +176,28 @@ class KFoldSplitter:
 def _get_groups(data: np.ndarray, dimension: str) -> list[np.ndarray]:
     """Group sample indices by the specified dimension.
 
-    For 'none' dimension, each sample is its own group.
-    For 'subject', samples are grouped by the first dimension.
-    For 'session', samples are grouped by (subject, session) pairs.
-    For 'recording', samples are grouped by (subject, session, recording) triples.
+    Data must have shape [subject, session, recording, channel, sample] (5D).
+    Each recording is one sample unit; total units = sub * sess * rec.
 
-    The data is expected to have shape [subject, session, recording, channel, sample]
-    or a flattened version thereof. We flatten to total samples and group accordingly.
+    For 'none', each recording is its own group.
+    For 'subject', recordings are grouped by subject.
+    For 'session', recordings are grouped by (subject, session).
+    For 'recording', each recording is its own group (same as 'none').
     """
-    if dimension == "none":
-        total = data.shape[0] if data.ndim <= 2 else int(np.prod(data.shape[:-2]))
+    if data.ndim != 5:
+        raise ConfigError(
+            f"Data must be 5-D [subject, session, recording, channel, sample], "
+            f"got {data.ndim}-D with shape {data.shape}",
+        )
+
+    n_subjects, n_sessions, n_recordings = data.shape[:3]
+    total = n_subjects * n_sessions * n_recordings
+
+    if dimension == "none" or dimension == "recording":
         return [np.array([i]) for i in range(total)]
 
-    if data.ndim < 3:
-        # Flat data: treat as single group per sample
-        return [np.array([i]) for i in range(len(data))]
-
-    # Multi-dimensional: shape is [subject, session, recording, channel, sample] or subset
     if dimension == "subject":
-        n_subjects = data.shape[0]
-        samples_per_subject = int(np.prod(data.shape[1:-2])) if data.ndim > 3 else 1
+        samples_per_subject = n_sessions * n_recordings
         groups = []
         for s in range(n_subjects):
             start = s * samples_per_subject
@@ -188,27 +205,11 @@ def _get_groups(data: np.ndarray, dimension: str) -> list[np.ndarray]:
         return groups
 
     if dimension == "session":
-        n_subjects = data.shape[0]
-        n_sessions = data.shape[1]
-        samples_per_session = int(np.prod(data.shape[2:-2])) if data.ndim > 4 else 1
         groups = []
         for s in range(n_subjects):
             for sess in range(n_sessions):
-                start = (s * n_sessions + sess) * samples_per_session
-                groups.append(np.arange(start, start + samples_per_session))
-        return groups
-
-    if dimension == "recording":
-        n_subjects = data.shape[0]
-        n_sessions = data.shape[1]
-        n_recordings = data.shape[2]
-        samples_per_recording = 1  # Each recording is one sample unit
-        groups = []
-        for s in range(n_subjects):
-            for sess in range(n_sessions):
-                for rec in range(n_recordings):
-                    idx = (s * n_sessions * n_recordings + sess * n_recordings + rec) * samples_per_recording
-                    groups.append(np.arange(idx, idx + samples_per_recording))
+                start = (s * n_sessions + sess) * n_recordings
+                groups.append(np.arange(start, start + n_recordings))
         return groups
 
     raise ConfigError(
