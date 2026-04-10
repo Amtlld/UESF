@@ -16,7 +16,7 @@ class EEGDataset(Dataset):
     """
 
     def __init__(self, data: np.ndarray, labels: np.ndarray) -> None:
-        self.data = data.astype(np.float32)
+        self.data = data if data.dtype == np.float32 else data.astype(np.float32)
         self.labels = labels
         assert len(self.data) == len(self.labels), (
             f"Data and labels length mismatch: {len(self.data)} vs {len(self.labels)}"

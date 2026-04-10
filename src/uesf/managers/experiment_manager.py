@@ -100,7 +100,7 @@ class ExperimentManager:
             if description:
                 content["description"] = description
             yml_path.write_text(
-                yaml.dump(content, default_flow_style=False, allow_unicode=True),
+                yaml.dump(content, default_flow_style=False, allow_unicode=True, sort_keys=False),
                 encoding="utf-8",
             )
         else:
@@ -325,26 +325,61 @@ class ExperimentManager:
         dataloaders_config = exp_config.get("dataloaders", {})
         k_fold_aggregation = eval_config.get("k_fold_aggregation", "concat")
 
-        # Process each dataset alias
-        all_split_data = {}
+        # Phase 1: Load data and compute split indices (indices are tiny).
+        # We keep one copy of raw data per dataset alias and only slice per fold
+        # during training to avoid materializing all folds simultaneously.
+        dataset_cache: dict[str, dict] = {}  # alias -> {data, labels, meta, splits, transforms_config}
         for alias, ds_cfg in datasets_config.items():
             ds_name = ds_cfg["name"]
             split_cfg = ds_cfg.get("split", {"strategy": "holdout"})
             split_cfg["seed"] = seed
 
-            # Load preprocessed data
             data, labels, dataset_meta = self._load_dataset(ds_name)
 
-            # Create splitter and split
+            # Split on original-shape data so dimension-based strategies
+            # (subject, session, recording) see the correct axes.
             splitter = create_splitter(split_cfg)
             splits = splitter.split(data)
 
-            # Apply transforms per fold
-            transforms_config = ds_cfg.get("transforms", [])
+            # Flatten to (n_total, channels, samples) for downstream indexing.
+            n_ch = dataset_meta["n_channels"]
+            n_samp = dataset_meta["n_samples"]
+            if data.ndim > 3:
+                data = data.reshape(-1, n_ch, n_samp)
+                labels = labels.reshape(-1)
 
-            for fold_idx, split_result in enumerate(splits):
-                fold_key = (alias, fold_idx)
-                si = split_result
+            dataset_cache[alias] = {
+                "data": data,
+                "labels": labels,
+                "meta": dataset_meta,
+                "splits": splits,
+                "transforms_config": ds_cfg.get("transforms", []),
+            }
+
+        # Determine number of folds and metadata
+        first_alias = next(iter(datasets_config.keys()))
+        n_folds = len(dataset_cache[first_alias]["splits"])
+        first_meta = dataset_cache[first_alias]["meta"]
+
+        # Phase 2: Train one fold at a time, slicing data on demand.
+        all_fold_results = []
+        all_fold_preds = []
+        all_fold_targets = []
+
+        batch_size = training_config.get("batch_size", 32)
+        num_workers = int(self.config.get("num_workers"))
+        dl_kw = {"batch_size": batch_size, "num_workers": num_workers}
+
+        for fold_idx in range(n_folds):
+            logger.info("=== Fold %d/%d ===", fold_idx + 1, n_folds)
+
+            # Slice and transform data for this fold only
+            fold_split_data: dict[tuple, dict] = {}
+            for alias, cache in dataset_cache.items():
+                data = cache["data"]
+                labels = cache["labels"]
+                si = cache["splits"][fold_idx]
+
                 train_data = data[si.train_indices] if len(si.train_indices) > 0 else np.array([])
                 train_labels = labels[si.train_indices] if len(si.train_indices) > 0 else np.array([])
                 val_data = data[si.val_indices] if len(si.val_indices) > 0 else np.array([])
@@ -352,8 +387,7 @@ class ExperimentManager:
                 test_data = data[si.test_indices] if len(si.test_indices) > 0 else np.array([])
                 test_labels = labels[si.test_indices] if len(si.test_indices) > 0 else np.array([])
 
-                # Apply online transforms
-                for t_cfg in transforms_config:
+                for t_cfg in cache["transforms_config"]:
                     t_name = t_cfg["name"]
                     t_params = t_cfg.get("params", {})
                     transform = create_transform(t_name, **t_params)
@@ -366,27 +400,12 @@ class ExperimentManager:
                         if len(test_data) > 0:
                             test_data = transform.transform(test_data)
 
-                all_split_data[fold_key] = {
+                fold_split_data[(alias, fold_idx)] = {
                     "train": (train_data, train_labels),
                     "val": (val_data, val_labels),
                     "test": (test_data, test_labels),
-                    "meta": dataset_meta,
+                    "meta": cache["meta"],
                 }
-
-        # Determine number of folds
-        n_folds = max(fold_idx + 1 for (_, fold_idx) in all_split_data.keys())
-
-        # Get dataset metadata for model instantiation
-        first_alias = next(iter(datasets_config.keys()))
-        first_meta = all_split_data[(first_alias, 0)]["meta"]
-
-        # Run training per fold
-        all_fold_results = []
-        all_fold_preds = []
-        all_fold_targets = []
-
-        for fold_idx in range(n_folds):
-            logger.info("=== Fold %d/%d ===", fold_idx + 1, n_folds)
 
             # Instantiate fresh model per fold
             model = model_cls(
@@ -422,13 +441,9 @@ class ExperimentManager:
 
             # Build dataloaders for this fold
             train_datasets, val_datasets, test_datasets = self._build_phase_datasets(
-                dataloaders_config, all_split_data, fold_idx,
+                dataloaders_config, fold_split_data, fold_idx,
             )
 
-            batch_size = training_config.get("batch_size", 32)
-            num_workers = int(self.config.get("num_workers"))
-
-            dl_kw = {"batch_size": batch_size, "num_workers": num_workers}
             train_loader = build_dataloaders(train_datasets, phase="train", **dl_kw)
             val_loader = (
                 build_dataloaders(val_datasets, phase="val", **dl_kw) if val_datasets else None
@@ -436,6 +451,9 @@ class ExperimentManager:
             test_loader = (
                 build_dataloaders(test_datasets, phase="test", **dl_kw) if test_datasets else None
             )
+
+            # Free fold slice data now that DataLoaders hold references to EEGDatasets
+            del fold_split_data
 
             # Checkpoint dir
             checkpoint_dir = project_dir / "experiments" / "results" / experiment_name / "checkpoints"
@@ -467,6 +485,14 @@ class ExperimentManager:
             all_fold_preds.append(fold_test_preds)
             all_fold_targets.append(fold_test_targets)
 
+            # Free DataLoaders and model for this fold
+            del train_loader, val_loader, test_loader
+            del train_datasets, val_datasets, test_datasets
+            del model, trainer, runner, optimizer
+            if scheduler is not None:
+                del scheduler
+            torch.cuda.empty_cache() if device.type == "cuda" else None
+
         # Aggregate results across folds
         if n_folds > 1:
             final_results = Evaluator.aggregate_fold_results(
@@ -485,7 +511,12 @@ class ExperimentManager:
         return final_results
 
     def _load_dataset(self, name: str) -> tuple[np.ndarray, np.ndarray, dict]:
-        """Load a preprocessed or masked dataset from disk."""
+        """Load a preprocessed or masked dataset from disk.
+
+        Returns the original-shape data (not flattened) so the splitter can
+        correctly interpret dimensions.  The caller is responsible for
+        flattening to (n_total, channels, samples) after splitting.
+        """
         # Try preprocessed first
         row = self.db.fetch_one("SELECT * FROM preprocessed_datasets WHERE name = ?", (name,))
         if row is None:
@@ -497,34 +528,24 @@ class ExperimentManager:
             )
 
         data_dir = Path(row["data_dir_path"])
-        data = np.load(str(data_dir / "eeg_data.npy"))
+        data = np.load(str(data_dir / "eeg_data.npy")).astype(np.float32)
         labels = np.load(str(data_dir / "labels.npy"))
 
-        # Flatten to (n_total_samples, channels, samples) for DataLoader
-        original_shape = data.shape
-        if data.ndim == 5:
-            # [subject, session, recording, channel, sample]
-            n_sub, n_sess, n_rec, n_ch, n_samp = data.shape
-            data = data.reshape(-1, n_ch, n_samp)
-            labels = labels.reshape(-1)
-        elif data.ndim == 4:
-            # [subject, recording, channel, sample]
-            n_sub, n_rec, n_ch, n_samp = data.shape
-            data = data.reshape(-1, n_ch, n_samp)
-            labels = labels.reshape(-1)
-        elif data.ndim == 3:
+        # Extract channel/sample metadata without flattening
+        if data.ndim >= 3:
             n_ch, n_samp = data.shape[-2], data.shape[-1]
+        elif data.ndim == 2:
+            n_ch, n_samp = data.shape[-1], 1
         else:
-            n_ch = data.shape[-1] if data.ndim >= 2 else 1
-            n_samp = 1
+            n_ch, n_samp = 1, 1
 
         n_classes = len(np.unique(labels))
 
         meta = {
-            "n_channels": n_ch if data.ndim >= 2 else data.shape[-1],
-            "n_samples": n_samp if data.ndim >= 2 else 1,
+            "n_channels": n_ch,
+            "n_samples": n_samp,
             "n_classes": n_classes,
-            "original_shape": original_shape,
+            "original_shape": data.shape,
         }
 
         return data, labels, meta
