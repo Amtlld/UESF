@@ -192,6 +192,7 @@ metrics:
 | `name` | 必填 | string | 实验名称（与文件名一致） |
 | `description` | 可选 | string | 实验描述 |
 | `seed` | 推荐 | int | 随机种子，保证切分可复现 |
+| `mode` | 可选 | string | `regular`（默认）或 `uda` |
 
 ### model / trainer
 
@@ -216,9 +217,51 @@ metrics:
 | `datasets.<alias>.split.test_ratio` | Holdout 专有 |
 | `datasets.<alias>.transforms` | 在线变换列表（`name`、`fit_on`、`apply_to`、`params`） |
 
+### split（顶层，`dimension: dataset` 时使用）
+
+当按数据集维度切分时，`split` 块位于与 `datasets` 同级的顶层：
+
+| 字段 | 说明 |
+|------|------|
+| `split.dimension` | 必须为 `dataset` |
+| `split.train` | 显式指定训练集数据集别名列表（优先） |
+| `split.val` | 显式指定验证集数据集别名列表（可选） |
+| `split.test` | 显式指定测试集数据集别名列表（优先） |
+| `split.train_ratio` | 未显式指定时，按比例分配 |
+| `split.val_ratio` | 未显式指定时，按比例分配 |
+| `split.test_ratio` | 未显式指定时，按比例分配 |
+| `split.shuffle` | bool，比例分配时是否随机打乱 |
+
+### uda（`mode: uda` 时必填）
+
+| 字段 | 说明 |
+|------|------|
+| `uda.type` | `cross-dataset`（跨数据集）或 `intra-dataset`（数据集内） |
+| `uda.strategy` | `holdout` 或 `k-fold` |
+| `uda.variant` | `transductive` 或 `inductive` |
+| `uda.dimension` | `intra-dataset` 专有，`subject` 或 `session` |
+| `uda.target_count` | `intra-dataset` holdout 专有，目标域包含的组数（优先于 `target_ratio`） |
+| `uda.target_ratio` | `intra-dataset` holdout 专有，目标域占总组数的比例 |
+| `uda.source_datasets` | `cross-dataset` holdout 专有，源域数据集别名列表 |
+| `uda.target_dataset` | `cross-dataset` holdout 专有，目标域数据集别名 |
+| `uda.k-folds` | k-fold 策略专有，折数；`-1` 或 `total` 为 LOOCV |
+| `uda.source_split.val_ratio` | 可选，从源域划出验证集的比例 |
+| `uda.target_split.dimension` | `inductive` 专有，目标域内部切分维度 |
+| `uda.target_split.train_ratio` | `inductive` 专有 |
+| `uda.target_split.val_ratio` | `inductive` 专有，可选 |
+| `uda.target_split.test_ratio` | `inductive` 专有 |
+
+### alignment（多数据集实验可选）
+
+| 字段 | 说明 |
+|------|------|
+| `alignment.channels.method` | 通道对齐方法，目前仅支持 `intersection` |
+| `alignment.labels.check_consistency` | bool，是否验证标签一致性（默认 `true`） |
+
 ### dataloaders
 
 ```yaml
+# 常规模式
 dataloaders:
   train:
     <channel_name>: "<dataset_alias>.<split_phase>"
@@ -226,6 +269,9 @@ dataloaders:
     <channel_name>: "<dataset_alias>.val"
   test:
     <channel_name>: "<dataset_alias>.test"
+
+# UDA 模式（框架自动生成 source/target 通道）
+# 训练时 batch 包含 "source" 和 "target" 两个键
 ```
 
 ### training

@@ -22,14 +22,20 @@ from uesf.core.config import ConfigManager
 from uesf.core.database import DatabaseManager
 from uesf.core.exceptions import (
     ComponentNotFoundError,
+    ConfigError,
     YAMLParseError,
 )
 from uesf.core.logging import get_logger
+from uesf.experiment.alignment import LabelAligner, create_channel_aligner
 from uesf.experiment.dataloader_builder import build_dataloaders
 from uesf.experiment.dataset import EEGDataset
 from uesf.experiment.evaluator import Evaluator
 from uesf.experiment.runner import Runner
-from uesf.experiment.splitter import create_splitter
+from uesf.experiment.splitter import (
+    DatasetLevelSplitter,
+    UDASplitResult,
+    create_splitter,
+)
 from uesf.experiment.transforms import create_transform
 from uesf.managers.metric_manager import MetricManager
 from uesf.managers.model_manager import ModelManager
@@ -208,7 +214,7 @@ class ExperimentManager:
         experiment_name: str,
         exp_record_id: int,
     ) -> dict[str, Any]:
-        """Internal execution logic."""
+        """Internal execution logic — dispatches to mode-specific methods."""
         seed = exp_config.get("seed", 42)
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -217,7 +223,70 @@ class ExperimentManager:
         training_config = exp_config.get("training", {})
         eval_config = exp_config.get("evaluation", {})
 
-        # 1. Initialize model
+        # --- Component initialisation (shared by all modes) ---
+        model_cls, model_params, model_id = self._init_model(
+            exp_config, project_config, project_dir,
+        )
+        trainer_cls, trainer_params, trainer_id = self._init_trainer(
+            exp_config, project_config, project_dir,
+        )
+        metric_funcs = self._init_metrics(eval_config, project_config, project_dir)
+
+        # Link component IDs to experiment record
+        self.db.execute(
+            """UPDATE experiments SET model_id = ?, trainer_id = ?,
+               updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (model_id, trainer_id, exp_record_id),
+        )
+        self.db.commit()
+
+        # --- Load all datasets ---
+        datasets_config = exp_config.get("datasets", {})
+        dataset_cache = self._load_all_datasets(datasets_config, seed)
+
+        # --- Cross-dataset alignment ---
+        alignment_config = exp_config.get("alignment", {})
+        if len(dataset_cache) > 1 and alignment_config:
+            self._apply_alignment(dataset_cache, alignment_config)
+
+        # Shared kwargs passed to every execution mode
+        ctx = {
+            "project_dir": project_dir,
+            "exp_config": exp_config,
+            "experiment_name": experiment_name,
+            "seed": seed,
+            "device": device,
+            "training_config": training_config,
+            "eval_config": eval_config,
+            "model_cls": model_cls,
+            "model_params": model_params,
+            "trainer_cls": trainer_cls,
+            "trainer_params": trainer_params,
+            "metric_funcs": metric_funcs,
+            "dataset_cache": dataset_cache,
+            "datasets_config": datasets_config,
+        }
+
+        # --- Mode dispatch ---
+        mode = exp_config.get("mode", "regular")
+
+        if mode == "uda":
+            return self._execute_uda(**ctx)
+
+        # Regular mode — check for dataset-level split
+        top_split = exp_config.get("split", {})
+        if top_split.get("dimension") == "dataset":
+            return self._execute_dataset_split(top_split=top_split, **ctx)
+
+        return self._execute_regular(**ctx)
+
+    # ------------------------------------------------------------------
+    # Component initialisation helpers
+    # ------------------------------------------------------------------
+
+    def _init_model(
+        self, exp_config: dict, project_config: dict, project_dir: Path,
+    ) -> tuple[type, dict, int | None]:
         model_config = exp_config.get("model", {})
         model_name = model_config.get("name")
         model_params = model_config.get("params", {})
@@ -226,7 +295,6 @@ class ExperimentManager:
             model_name, "models", project_config, project_dir,
         )
 
-        # Register or detect source changes for project-level model
         model_id = None
         if model_resolution["source"] == "PROJECT" and model_resolution.get("entrypoint"):
             entrypoint = model_resolution["entrypoint"]
@@ -243,14 +311,16 @@ class ExperimentManager:
         elif model_resolution.get("record"):
             model_id = model_resolution["record"]["id"]
 
-        # Load model class and get dataset info for auto-injection
         model_cls = self.model_manager.load_class(
             model_name,
             entrypoint=model_resolution.get("entrypoint"),
             project_dir=project_dir,
         )
+        return model_cls, model_params, model_id
 
-        # 2. Initialize trainer
+    def _init_trainer(
+        self, exp_config: dict, project_config: dict, project_dir: Path,
+    ) -> tuple[type, dict, int | None]:
         trainer_config = exp_config.get("trainer", {})
         trainer_name = trainer_config.get("name")
         trainer_params = trainer_config.get("params", {})
@@ -259,7 +329,6 @@ class ExperimentManager:
             trainer_name, "trainers", project_config, project_dir,
         )
 
-        # Register or detect source changes for project-level trainer
         trainer_id = None
         if trainer_resolution["source"] == "PROJECT" and trainer_resolution.get("entrypoint"):
             entrypoint = trainer_resolution["entrypoint"]
@@ -281,8 +350,11 @@ class ExperimentManager:
             entrypoint=trainer_resolution.get("entrypoint"),
             project_dir=project_dir,
         )
+        return trainer_cls, trainer_params, trainer_id
 
-        # 3. Load metrics
+    def _init_metrics(
+        self, eval_config: dict, project_config: dict, project_dir: Path,
+    ) -> dict[str, Any]:
         metric_names = eval_config.get("metrics", ["accuracy"])
         metric_funcs = {}
         for mname in metric_names:
@@ -311,103 +383,409 @@ class ExperimentManager:
                     )
 
             metric_funcs[mname] = self.metric_manager.load_metric(mname, project_dir=project_dir)
+        return metric_funcs
 
-        # Link component IDs to experiment record
-        self.db.execute(
-            """UPDATE experiments SET model_id = ?, trainer_id = ?,
-               updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
-            (model_id, trainer_id, exp_record_id),
-        )
-        self.db.commit()
+    # ------------------------------------------------------------------
+    # Dataset loading & alignment
+    # ------------------------------------------------------------------
 
-        # 4. Load datasets, split, transform, train
-        datasets_config = exp_config.get("datasets", {})
-        dataloaders_config = exp_config.get("dataloaders", {})
-        k_fold_aggregation = eval_config.get("k_fold_aggregation", "concat")
+    def _load_all_datasets(
+        self, datasets_config: dict, seed: int,
+    ) -> dict[str, dict]:
+        """Load every dataset listed in the config into a cache dict.
 
-        # Phase 1: Load data and compute split indices (indices are tiny).
-        # We keep one copy of raw data per dataset alias and only slice per fold
-        # during training to avoid materializing all folds simultaneously.
-        dataset_cache: dict[str, dict] = {}  # alias -> {data, labels, meta, splits, transforms_config}
+        Each entry: ``{data, labels, meta, transforms_config}``.
+        Data is kept in original 5-D shape for splitters.
+        """
+        dataset_cache: dict[str, dict] = {}
         for alias, ds_cfg in datasets_config.items():
             ds_name = ds_cfg["name"]
-            split_cfg = ds_cfg.get("split", {"strategy": "holdout"})
-            split_cfg["seed"] = seed
-
-            data, labels, dataset_meta = self._load_dataset(ds_name)
-
-            # Split on original-shape data so dimension-based strategies
-            # (subject, session, recording) see the correct axes.
-            splitter = create_splitter(split_cfg)
-            splits = splitter.split(data)
-
-            # Flatten to (n_total, channels, samples) for downstream indexing.
-            n_ch = dataset_meta["n_channels"]
-            n_samp = dataset_meta["n_samples"]
-            if data.ndim > 3:
-                data = data.reshape(-1, n_ch, n_samp)
-                labels = labels.reshape(-1)
-
+            data, labels, meta = self._load_dataset(ds_name)
             dataset_cache[alias] = {
                 "data": data,
                 "labels": labels,
-                "meta": dataset_meta,
-                "splits": splits,
+                "meta": meta,
                 "transforms_config": ds_cfg.get("transforms", []),
             }
+        return dataset_cache
 
-        # Determine number of folds and metadata
+    def _apply_alignment(
+        self, dataset_cache: dict[str, dict], alignment_config: dict,
+    ) -> None:
+        """Apply channel and label alignment in-place on dataset_cache."""
+        # Channel alignment
+        ch_config = alignment_config.get("channels", {})
+        if ch_config:
+            method = ch_config.get("method", "intersection")
+            aligner = create_channel_aligner(method)
+            input_map = {}
+            for alias, cache in dataset_cache.items():
+                electrodes = cache["meta"].get("electrode_list", [])
+                if not electrodes:
+                    raise ConfigError(
+                        f"Dataset '{alias}' has no electrode_list metadata — "
+                        "cannot perform channel alignment.",
+                        hint="Re-preprocess the dataset with electrode info.",
+                    )
+                input_map[alias] = (cache["data"], electrodes)
+
+            aligned_data, common_electrodes = aligner.align(input_map)
+            for alias in dataset_cache:
+                dataset_cache[alias]["data"] = aligned_data[alias]
+                dataset_cache[alias]["meta"]["electrode_list"] = common_electrodes
+                dataset_cache[alias]["meta"]["n_channels"] = len(common_electrodes)
+
+        # Label validation
+        label_config = alignment_config.get("labels", {})
+        if label_config.get("check_consistency", True):
+            label_aligner = LabelAligner()
+            label_aligner.validate({
+                alias: cache["meta"] for alias, cache in dataset_cache.items()
+            })
+
+    # ------------------------------------------------------------------
+    # Regular execution (backward-compatible path)
+    # ------------------------------------------------------------------
+
+    def _execute_regular(self, **ctx: Any) -> dict[str, Any]:
+        """Original single/multi-dataset execution with per-dataset splits."""
+        dataset_cache = ctx["dataset_cache"]
+        datasets_config = ctx["datasets_config"]
+        seed = ctx["seed"]
+        dataloaders_config = ctx["exp_config"].get("dataloaders", {})
+        k_fold_aggregation = ctx["eval_config"].get("k_fold_aggregation", "concat")
+
+        # Compute per-dataset splits
+        for alias, cache in dataset_cache.items():
+            ds_cfg = datasets_config[alias]
+            split_cfg = ds_cfg.get("split", {"strategy": "holdout"})
+            split_cfg["seed"] = seed
+            splitter = create_splitter(split_cfg)
+            cache["splits"] = splitter.split(cache["data"])
+            # Flatten to 3-D for downstream indexing
+            self._flatten_cache(cache)
+
         first_alias = next(iter(datasets_config.keys()))
         n_folds = len(dataset_cache[first_alias]["splits"])
         first_meta = dataset_cache[first_alias]["meta"]
 
-        # Phase 2: Train one fold at a time, slicing data on demand.
-        all_fold_results = []
-        all_fold_preds = []
-        all_fold_targets = []
+        return self._train_folds(
+            n_folds=n_folds,
+            first_meta=first_meta,
+            fold_data_fn=lambda fold_idx: self._regular_fold_data(
+                dataset_cache, dataloaders_config, fold_idx,
+            ),
+            k_fold_aggregation=k_fold_aggregation,
+            **ctx,
+        )
+
+    def _regular_fold_data(
+        self,
+        dataset_cache: dict[str, dict],
+        dataloaders_config: dict,
+        fold_idx: int,
+    ) -> tuple[dict, dict, dict]:
+        """Build phase datasets for one fold of a regular experiment."""
+        fold_split_data: dict[tuple, dict] = {}
+        for alias, cache in dataset_cache.items():
+            data = cache["data"]
+            labels = cache["labels"]
+            si = cache["splits"][fold_idx]
+
+            train_data = data[si.train_indices] if len(si.train_indices) > 0 else np.array([])
+            train_labels = labels[si.train_indices] if len(si.train_indices) > 0 else np.array([])
+            val_data = data[si.val_indices] if len(si.val_indices) > 0 else np.array([])
+            val_labels = labels[si.val_indices] if len(si.val_indices) > 0 else np.array([])
+            test_data = data[si.test_indices] if len(si.test_indices) > 0 else np.array([])
+            test_labels = labels[si.test_indices] if len(si.test_indices) > 0 else np.array([])
+
+            # Transforms: fit on train
+            for t_cfg in cache["transforms_config"]:
+                t_name = t_cfg["name"]
+                t_params = t_cfg.get("params", {})
+                transform = create_transform(t_name, **t_params)
+                if len(train_data) > 0:
+                    transform.fit(train_data)
+                    train_data = transform.transform(train_data)
+                    if len(val_data) > 0:
+                        val_data = transform.transform(val_data)
+                    if len(test_data) > 0:
+                        test_data = transform.transform(test_data)
+
+            fold_split_data[(alias, fold_idx)] = {
+                "train": (train_data, train_labels),
+                "val": (val_data, val_labels),
+                "test": (test_data, test_labels),
+                "meta": cache["meta"],
+            }
+
+        return self._build_phase_datasets(dataloaders_config, fold_split_data, fold_idx)
+
+    # ------------------------------------------------------------------
+    # Dataset-level split execution
+    # ------------------------------------------------------------------
+
+    def _execute_dataset_split(self, *, top_split: dict, **ctx: Any) -> dict[str, Any]:
+        """Regular DL with dimension=dataset: entire datasets as train/test."""
+        dataset_cache = ctx["dataset_cache"]
+        seed = ctx["seed"]
+        k_fold_aggregation = ctx["eval_config"].get("k_fold_aggregation", "concat")
+
+        top_split["seed"] = seed
+        splitter = create_splitter(top_split)
+        assert isinstance(splitter, DatasetLevelSplitter)
+        ds_splits = splitter.split(list(dataset_cache.keys()))
+
+        # Flatten all datasets
+        for cache in dataset_cache.values():
+            self._flatten_cache(cache)
+
+        n_folds = len(ds_splits)
+        first_meta = next(iter(dataset_cache.values()))["meta"]
+
+        def fold_data_fn(fold_idx: int) -> tuple[dict, dict, dict]:
+            phase_aliases = ds_splits[fold_idx].phase_aliases
+            return self._dataset_split_fold_data(
+                dataset_cache, phase_aliases, ctx.get("datasets_config", {}),
+            )
+
+        return self._train_folds(
+            n_folds=n_folds,
+            first_meta=first_meta,
+            fold_data_fn=fold_data_fn,
+            k_fold_aggregation=k_fold_aggregation,
+            **ctx,
+        )
+
+    def _dataset_split_fold_data(
+        self,
+        dataset_cache: dict[str, dict],
+        phase_aliases: dict[str, list[str]],
+        datasets_config: dict,
+    ) -> tuple[dict, dict, dict]:
+        """Build phase datasets for a dataset-level split fold."""
+        train_datasets: dict[str, EEGDataset] = {}
+        val_datasets: dict[str, EEGDataset] = {}
+        test_datasets: dict[str, EEGDataset] = {}
+
+        # Collect transforms config from all datasets in the training phase
+        transforms_config = []
+        for alias in phase_aliases.get("train", []):
+            transforms_config = dataset_cache[alias].get("transforms_config", [])
+            if transforms_config:
+                break
+
+        # Fit transforms on concatenated training data
+        transform_instances = []
+        if transforms_config:
+            train_data_parts = [
+                dataset_cache[a]["data"] for a in phase_aliases.get("train", [])
+                if len(dataset_cache[a]["data"]) > 0
+            ]
+            if train_data_parts:
+                concat_train = np.concatenate(train_data_parts)
+                for t_cfg in transforms_config:
+                    t = create_transform(t_cfg["name"], **t_cfg.get("params", {}))
+                    t.fit(concat_train)
+                    concat_train = t.transform(concat_train)
+                    transform_instances.append(t)
+
+        for phase, target_dict in [
+            ("train", train_datasets), ("val", val_datasets), ("test", test_datasets),
+        ]:
+            parts_data, parts_labels = [], []
+            for alias in phase_aliases.get(phase, []):
+                d = dataset_cache[alias]["data"]
+                l = dataset_cache[alias]["labels"]
+                if len(d) > 0:
+                    for t in transform_instances:
+                        d = t.transform(d)
+                    parts_data.append(d)
+                    parts_labels.append(l)
+
+            if parts_data:
+                target_dict["main"] = EEGDataset(
+                    np.concatenate(parts_data),
+                    np.concatenate(parts_labels),
+                )
+
+        return train_datasets, val_datasets, test_datasets
+
+    # ------------------------------------------------------------------
+    # UDA execution
+    # ------------------------------------------------------------------
+
+    def _execute_uda(self, **ctx: Any) -> dict[str, Any]:
+        """Execute a UDA experiment (cross-dataset or intra-dataset)."""
+        exp_config = ctx["exp_config"]
+        dataset_cache = ctx["dataset_cache"]
+        seed = ctx["seed"]
+        k_fold_aggregation = ctx["eval_config"].get("k_fold_aggregation", "concat")
+
+        uda_config = exp_config.get("uda", {})
+        uda_config["seed"] = seed
+        splitter = create_splitter(mode="uda", uda_config=uda_config)
+
+        uda_type = uda_config["type"]
+
+        if uda_type == "intra-dataset":
+            # Single dataset — split on its 5-D data
+            alias = next(iter(dataset_cache.keys()))
+            uda_splits: list[UDASplitResult] = splitter.split(
+                dataset_cache[alias]["data"], alias=alias,
+            )
+            # Flatten after splitting
+            self._flatten_cache(dataset_cache[alias])
+        else:
+            # Cross-dataset — pass full cache (5-D data intact for inductive split)
+            uda_splits = splitter.split(dataset_cache)
+            # Flatten all datasets after splitting
+            for cache in dataset_cache.values():
+                self._flatten_cache(cache)
+
+        n_folds = len(uda_splits)
+        first_meta = next(iter(dataset_cache.values()))["meta"]
+
+        def fold_data_fn(fold_idx: int) -> tuple[dict, dict, dict]:
+            return self._uda_fold_data(
+                dataset_cache, uda_splits[fold_idx], uda_config,
+            )
+
+        return self._train_folds(
+            n_folds=n_folds,
+            first_meta=first_meta,
+            fold_data_fn=fold_data_fn,
+            k_fold_aggregation=k_fold_aggregation,
+            **ctx,
+        )
+
+    def _uda_fold_data(
+        self,
+        dataset_cache: dict[str, dict],
+        uda_split: UDASplitResult,
+        uda_config: dict,
+    ) -> tuple[dict, dict, dict]:
+        """Build phase datasets for one fold of a UDA experiment."""
+        # Gather source data
+        src_train_d, src_train_l = self._gather_domain_data(
+            dataset_cache, uda_split.source_train_indices,
+        )
+        src_val_d, src_val_l = self._gather_domain_data(
+            dataset_cache, uda_split.source_val_indices,
+        )
+
+        # Gather target data
+        tgt_train_d, tgt_train_l = self._gather_domain_data(
+            dataset_cache, uda_split.target_train_indices,
+        )
+        tgt_val_d, tgt_val_l = self._gather_domain_data(
+            dataset_cache, uda_split.target_val_indices,
+        )
+        tgt_test_d, tgt_test_l = self._gather_domain_data(
+            dataset_cache, uda_split.target_test_indices,
+        )
+
+        # Transforms: fit on SOURCE train, apply to all
+        transforms_config = self._collect_transforms(dataset_cache)
+        transform_instances = []
+        for t_cfg in transforms_config:
+            t = create_transform(t_cfg["name"], **t_cfg.get("params", {}))
+            if len(src_train_d) > 0:
+                t.fit(src_train_d)
+                src_train_d = t.transform(src_train_d)
+                if len(src_val_d) > 0:
+                    src_val_d = t.transform(src_val_d)
+                if len(tgt_train_d) > 0:
+                    tgt_train_d = t.transform(tgt_train_d)
+                if len(tgt_val_d) > 0:
+                    tgt_val_d = t.transform(tgt_val_d)
+                if len(tgt_test_d) > 0:
+                    tgt_test_d = t.transform(tgt_test_d)
+            transform_instances.append(t)
+
+        # Build EEGDataset dicts
+        train_datasets: dict[str, EEGDataset] = {}
+        val_datasets: dict[str, EEGDataset] = {}
+        test_datasets: dict[str, EEGDataset] = {}
+
+        if len(src_train_d) > 0:
+            train_datasets["source"] = EEGDataset(src_train_d, src_train_l)
+        if len(tgt_train_d) > 0:
+            train_datasets["target"] = EEGDataset(tgt_train_d, tgt_train_l)
+        if len(src_val_d) > 0:
+            val_datasets["source_val"] = EEGDataset(src_val_d, src_val_l)
+        if len(tgt_val_d) > 0:
+            val_datasets["target_val"] = EEGDataset(tgt_val_d, tgt_val_l)
+        if len(tgt_test_d) > 0:
+            test_datasets["main"] = EEGDataset(tgt_test_d, tgt_test_l)
+
+        return train_datasets, val_datasets, test_datasets
+
+    @staticmethod
+    def _gather_domain_data(
+        dataset_cache: dict[str, dict],
+        index_map: dict[str, np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Concatenate data from one or more datasets using index arrays."""
+        all_data, all_labels = [], []
+        for alias, indices in index_map.items():
+            if len(indices) == 0:
+                continue
+            cache = dataset_cache[alias]
+            all_data.append(cache["data"][indices])
+            all_labels.append(cache["labels"][indices])
+        if all_data:
+            return np.concatenate(all_data), np.concatenate(all_labels)
+        return np.array([]), np.array([])
+
+    @staticmethod
+    def _collect_transforms(dataset_cache: dict[str, dict]) -> list[dict]:
+        """Get the first non-empty transforms_config from any cached dataset."""
+        for cache in dataset_cache.values():
+            cfg = cache.get("transforms_config", [])
+            if cfg:
+                return cfg
+        return []
+
+    # ------------------------------------------------------------------
+    # Shared training loop
+    # ------------------------------------------------------------------
+
+    def _train_folds(
+        self,
+        *,
+        n_folds: int,
+        first_meta: dict,
+        fold_data_fn,
+        k_fold_aggregation: str,
+        **ctx: Any,
+    ) -> dict[str, Any]:
+        """Run training across folds — shared by all execution modes."""
+        training_config = ctx["training_config"]
+        model_cls = ctx["model_cls"]
+        model_params = ctx["model_params"]
+        trainer_cls = ctx["trainer_cls"]
+        trainer_params = ctx["trainer_params"]
+        metric_funcs = ctx["metric_funcs"]
+        device = ctx["device"]
+        project_dir = ctx["project_dir"]
+        experiment_name = ctx["experiment_name"]
+        exp_config = ctx["exp_config"]
 
         batch_size = training_config.get("batch_size", 32)
         num_workers = int(self.config.get("num_workers"))
         dl_kw = {"batch_size": batch_size, "num_workers": num_workers}
 
+        all_fold_results = []
+        all_fold_preds = []
+        all_fold_targets = []
+
         for fold_idx in range(n_folds):
             logger.info("=== Fold %d/%d ===", fold_idx + 1, n_folds)
 
-            # Slice and transform data for this fold only
-            fold_split_data: dict[tuple, dict] = {}
-            for alias, cache in dataset_cache.items():
-                data = cache["data"]
-                labels = cache["labels"]
-                si = cache["splits"][fold_idx]
+            train_datasets, val_datasets, test_datasets = fold_data_fn(fold_idx)
 
-                train_data = data[si.train_indices] if len(si.train_indices) > 0 else np.array([])
-                train_labels = labels[si.train_indices] if len(si.train_indices) > 0 else np.array([])
-                val_data = data[si.val_indices] if len(si.val_indices) > 0 else np.array([])
-                val_labels = labels[si.val_indices] if len(si.val_indices) > 0 else np.array([])
-                test_data = data[si.test_indices] if len(si.test_indices) > 0 else np.array([])
-                test_labels = labels[si.test_indices] if len(si.test_indices) > 0 else np.array([])
-
-                for t_cfg in cache["transforms_config"]:
-                    t_name = t_cfg["name"]
-                    t_params = t_cfg.get("params", {})
-                    transform = create_transform(t_name, **t_params)
-
-                    if len(train_data) > 0:
-                        transform.fit(train_data)
-                        train_data = transform.transform(train_data)
-                        if len(val_data) > 0:
-                            val_data = transform.transform(val_data)
-                        if len(test_data) > 0:
-                            test_data = transform.transform(test_data)
-
-                fold_split_data[(alias, fold_idx)] = {
-                    "train": (train_data, train_labels),
-                    "val": (val_data, val_labels),
-                    "test": (test_data, test_labels),
-                    "meta": cache["meta"],
-                }
-
-            # Instantiate fresh model per fold
+            # Fresh model per fold
             model = model_cls(
                 n_channels=first_meta["n_channels"],
                 n_samples=first_meta["n_samples"],
@@ -418,13 +796,18 @@ class ExperimentManager:
             trainer = trainer_cls(model, device, **trainer_params)
             evaluator = Evaluator(metric_funcs)
 
-            # Setup optimizer/scheduler
+            # Optimizer / scheduler
             custom_optim = trainer.configure_optimizers()
             if custom_optim is not None:
-                logger.warning("Trainer.configure_optimizers() returned non-None; ignoring YAML optimizer/scheduler.")
+                logger.warning(
+                    "Trainer.configure_optimizers() returned non-None; "
+                    "ignoring YAML optimizer/scheduler.",
+                )
                 optimizer, scheduler = custom_optim
             else:
-                opt_config = training_config.get("optimizer", {"name": "adam", "params": {"lr": 0.001}})
+                opt_config = training_config.get(
+                    "optimizer", {"name": "adam", "params": {"lr": 0.001}},
+                )
                 optimizer = resolve_optimizer(
                     opt_config["name"],
                     model.parameters(),
@@ -439,11 +822,7 @@ class ExperimentManager:
                         sched_config.get("params", {}),
                     )
 
-            # Build dataloaders for this fold
-            train_datasets, val_datasets, test_datasets = self._build_phase_datasets(
-                dataloaders_config, fold_split_data, fold_idx,
-            )
-
+            # Build dataloaders
             train_loader = build_dataloaders(train_datasets, phase="train", **dl_kw)
             val_loader = (
                 build_dataloaders(val_datasets, phase="val", **dl_kw) if val_datasets else None
@@ -452,11 +831,10 @@ class ExperimentManager:
                 build_dataloaders(test_datasets, phase="test", **dl_kw) if test_datasets else None
             )
 
-            # Free fold slice data now that DataLoaders hold references to EEGDatasets
-            del fold_split_data
-
             # Checkpoint dir
-            checkpoint_dir = project_dir / "experiments" / "results" / experiment_name / "checkpoints"
+            checkpoint_dir = (
+                project_dir / "experiments" / "results" / experiment_name / "checkpoints"
+            )
             if n_folds > 1:
                 checkpoint_dir = checkpoint_dir / f"fold_{fold_idx}"
 
@@ -474,24 +852,31 @@ class ExperimentManager:
 
             # Test evaluation
             test_metrics = {}
-            fold_test_preds = []
-            fold_test_targets = []
+            fold_test_preds: list = []
+            fold_test_targets: list = []
             if test_loader and len(test_loader) > 0:
-                test_metrics, fold_test_preds, fold_test_targets = runner.validate_epoch(test_loader)
+                test_metrics, fold_test_preds, fold_test_targets = runner.validate_epoch(
+                    test_loader,
+                )
                 test_metrics = {f"test_{k}": v for k, v in test_metrics.items()}
 
-            fold_result = {**run_result["best_metrics"], **test_metrics, "epochs_run": run_result["epochs_run"]}
+            fold_result = {
+                **run_result["best_metrics"],
+                **test_metrics,
+                "epochs_run": run_result["epochs_run"],
+            }
             all_fold_results.append(fold_result)
             all_fold_preds.append(fold_test_preds)
             all_fold_targets.append(fold_test_targets)
 
-            # Free DataLoaders and model for this fold
+            # Free per-fold resources
             del train_loader, val_loader, test_loader
             del train_datasets, val_datasets, test_datasets
             del model, trainer, runner, optimizer
             if scheduler is not None:
                 del scheduler
-            torch.cuda.empty_cache() if device.type == "cuda" else None
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
         # Aggregate results across folds
         if n_folds > 1:
@@ -507,8 +892,21 @@ class ExperimentManager:
             final_results = all_fold_results[0] if all_fold_results else {}
 
         final_results["n_folds"] = n_folds
-
         return final_results
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _flatten_cache(cache: dict) -> None:
+        """Flatten 5-D data to 3-D ``(n_total, ch, samp)`` in place."""
+        data = cache["data"]
+        if data.ndim > 3:
+            n_ch = cache["meta"]["n_channels"]
+            n_samp = cache["meta"]["n_samples"]
+            cache["data"] = data.reshape(-1, n_ch, n_samp)
+            cache["labels"] = cache["labels"].reshape(-1)
 
     def _load_dataset(self, name: str) -> tuple[np.ndarray, np.ndarray, dict]:
         """Load a preprocessed or masked dataset from disk.
@@ -541,11 +939,28 @@ class ExperimentManager:
 
         n_classes = len(np.unique(labels))
 
+        # Extract electrode_list and numeric_to_semantic from DB row
+        electrode_list = None
+        if row.get("electrode_list"):
+            try:
+                electrode_list = json.loads(row["electrode_list"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        numeric_to_semantic = None
+        if row.get("numeric_to_semantic"):
+            try:
+                numeric_to_semantic = json.loads(row["numeric_to_semantic"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         meta = {
             "n_channels": n_ch,
             "n_samples": n_samp,
             "n_classes": n_classes,
             "original_shape": data.shape,
+            "electrode_list": electrode_list,
+            "numeric_to_semantic": numeric_to_semantic,
         }
 
         return data, labels, meta
@@ -697,6 +1112,7 @@ def _experiment_template(name: str, description: str | None = None) -> str:
 name: {name}
 description: "{description or ''}"
 seed: 42
+# mode: regular  # "regular" (default) or "uda"
 
 model:
   name: ""  # Model name from project.yml or global registry
@@ -756,4 +1172,28 @@ evaluation:
 logging:
   use_wandb: false
   checkpoint_metric: val_accuracy
+
+# --- UDA example (uncomment to use) ---
+# mode: uda
+# uda:
+#   type: intra-dataset        # or "cross-dataset"
+#   dimension: subject          # for intra-dataset: "subject" or "session"
+#   strategy: k-fold            # "holdout" or "k-fold"
+#   k-folds: -1                 # -1 for LOOCV
+#   variant: transductive       # "transductive" or "inductive"
+#   # target_count: 1           # for holdout
+#   # source_split:
+#   #   val_ratio: 0.15
+#   # target_split:             # for inductive
+#   #   dimension: recording
+#   #   train_ratio: 0.7
+#   #   val_ratio: 0.1
+#   #   test_ratio: 0.2
+#
+# --- Cross-dataset alignment (for multi-dataset experiments) ---
+# alignment:
+#   channels:
+#     method: intersection
+#   labels:
+#     check_consistency: true
 """

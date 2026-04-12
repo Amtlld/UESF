@@ -20,8 +20,8 @@
                        │
 ┌──────────────────────▼──────────────────────────┐
 │                   实验引擎层                      │
-│  Splitter  Transforms  DataLoader  Runner        │
-│  Evaluator                                       │
+│  Alignment  Splitter  Transforms  DataLoader     │
+│  Runner  Evaluator                               │
 └──────────────────────┬──────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────┐
@@ -68,12 +68,18 @@ UESF 管理三类数据集对象，每种在系统中的角色不同：
 
 ## 实验执行数据流
 
-`uesf experiment run` 执行时，数据经过以下 5 个阶段：
+`uesf experiment run` 执行时，数据经过以下阶段。常规模式和 UDA 模式共享相同的引擎层，仅在数据切分和变换阶段有差异。
+
+### 常规模式数据流
 
 ```
 阶段 1：数据加载（Data Loading）
   └── 读取 features.npy 和 labels.npy
       Masked Dataset 在此应用标签视图映射
+
+阶段 1.5：跨数据集对齐（Alignment，仅多数据集时）
+  ├── 通道对齐：计算所有数据集的电极交集，仅保留共有通道
+  └── 标签对齐：验证类别数和标签映射一致性
 
 阶段 2：索引切分（Splitter）
   └── 按配置的 strategy 和 dimension 生成 train/val/test 索引
@@ -93,6 +99,28 @@ UESF 管理三类数据集对象，每种在系统中的角色不同：
       → 将 batch 字典传给 Trainer.training_step（Trainer 全权负责梯度）
       → Trainer.validation_step 返回 preds/targets
       → Evaluator 在 epoch 结束时聚合，计算指标
+```
+
+### UDA 模式数据流
+
+```
+阶段 1：数据加载 + 跨数据集对齐（同上）
+
+阶段 2：UDA 切分（UDA Splitter）
+  ├── 跨数据集：按 alias 将数据集分为源域和目标域
+  └── 数据集内：按 subject/session 分组，将组分配到源域和目标域
+      Transductive：目标域全部数据 = 训练 + 测试
+      Inductive：目标域按 target_split 配置再切分 train(/val)/test
+
+阶段 3：在线变换
+  └── fit_on: 源域训练数据 → apply_to: 源域 + 目标域所有子集
+
+阶段 4：DataLoader 构建
+  └── 训练 batch 包含 "source" 和 "target" 两个通道键
+
+阶段 5：训练与评估（同上）
+  └── Trainer 通过 batch["source"] 和 batch["target"]
+      实现域自适应算法（MMD、对抗训练等）
 ```
 
 ---

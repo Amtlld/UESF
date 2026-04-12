@@ -182,7 +182,7 @@ def configure_optimizers(self) -> Optional[tuple[torch.optim.Optimizer, Any]]
 
 若返回非 `None`，实验 YAML 中的 `training.optimizer` 和 `training.scheduler` 将被忽略，框架会在日志中发出警告。
 
-### 最小实现模板
+### 最小实现模板（常规实验）
 
 ```python
 from typing import Any
@@ -219,6 +219,55 @@ class MyTrainer(BaseTrainer):
         with torch.no_grad():
             preds = self.model(data).argmax(dim=1)
 
+        return {"preds": preds.cpu(), "targets": labels}
+```
+
+### UDA 实验的 Batch 结构
+
+UDA 模式下，`batch` 字典包含 `"source"` 和 `"target"` 两个通道键：
+
+```python
+batch = {
+    "source": (source_data, source_labels),    # 源域（有标签）
+    "target": (target_data, target_labels),    # 目标域（标签不应在训练中使用）
+}
+```
+
+验证集可能包含 `"source_val"` 和/或 `"target_val"` 键，测试集包含 `"main"` 键。
+
+### UDA Trainer 实现模板
+
+```python
+class UDATrainer(BaseTrainer):
+    def training_step(self, batch, batch_idx, optimizer):
+        src_data, src_labels = batch["source"]
+        tgt_data, _ = batch["target"]  # 不使用目标域标签
+        src_data = src_data.to(self.device)
+        src_labels = src_labels.to(self.device)
+        tgt_data = tgt_data.to(self.device)
+
+        # 源域有监督损失
+        src_logits = self.model(src_data)
+        cls_loss = F.cross_entropy(src_logits, src_labels)
+
+        # 域自适应损失（如 MMD、对抗训练等）
+        src_feat = self.model.extract_features(src_data)
+        tgt_feat = self.model.extract_features(tgt_data)
+        adapt_loss = self._compute_mmd(src_feat, tgt_feat)
+
+        loss = cls_loss + 0.1 * adapt_loss
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        return {"loss": loss.item(), "cls_loss": cls_loss.item()}
+
+    def validation_step(self, batch, batch_idx):
+        # 测试集使用 "main" 键
+        data, labels = batch["main"]
+        data = data.to(self.device)
+        with torch.no_grad():
+            preds = self.model(data).argmax(dim=1)
         return {"preds": preds.cpu(), "targets": labels}
 ```
 

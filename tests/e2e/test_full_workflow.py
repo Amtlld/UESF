@@ -45,25 +45,35 @@ def setup_env(uesf_home, db):
     }
 
 
-def _create_fake_preprocessed(db, data_dir: Path, name: str, n_samples=60, n_channels=8, n_timepoints=50, n_classes=2):
-    """Create a fake preprocessed dataset with .npy files and DB record."""
+def _create_fake_preprocessed(
+    db, data_dir: Path, name: str,
+    n_subjects=6, n_sessions=2, n_recordings=5,
+    n_channels=8, n_timepoints=50, n_classes=2,
+):
+    """Create a fake preprocessed 5-D dataset with .npy files and DB record.
+
+    Shape: [subject, session, recording, channel, sample].
+    """
     ds_dir = data_dir / name
     ds_dir.mkdir(parents=True)
 
-    # Generate random data: (n_samples, n_channels, n_timepoints)
-    data = np.random.randn(n_samples, n_channels, n_timepoints).astype(np.float32)
-    labels = np.random.randint(0, n_classes, n_samples).astype(np.int64)
+    data = np.random.randn(
+        n_subjects, n_sessions, n_recordings, n_channels, n_timepoints,
+    ).astype(np.float32)
+    total_recordings = n_subjects * n_sessions * n_recordings
+    labels = np.random.randint(0, n_classes, total_recordings).astype(np.int64)
 
     np.save(str(ds_dir / "eeg_data.npy"), data)
     np.save(str(ds_dir / "labels.npy"), labels)
 
+    shape_str = f"[{n_subjects}, {n_sessions}, {n_recordings}, {n_channels}, {n_timepoints}]"
     db.execute(
         """INSERT INTO preprocessed_datasets
            (name, data_dir_path, data_shape, numeric_to_semantic,
             n_subjects, n_channels, n_samples)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (name, str(ds_dir), f"[{n_samples}, {n_channels}, {n_timepoints}]",
-         '{"0": "class_0", "1": "class_1"}', n_samples, n_channels, n_timepoints),
+        (name, str(ds_dir), shape_str,
+         '{"0": "class_0", "1": "class_1"}', n_subjects, n_channels, n_timepoints),
     )
     db.commit()
 
@@ -219,7 +229,7 @@ class TestFullWorkflow:
         project_dir = tmp_path / "project"
         dataset_name = "kfold_dataset"
 
-        _create_fake_preprocessed(env["db"], data_dir, dataset_name, n_samples=30)
+        _create_fake_preprocessed(env["db"], data_dir, dataset_name, n_subjects=3, n_sessions=2, n_recordings=5)
         _create_project_with_dummy(project_dir, dataset_name)
 
         # Create K-Fold experiment config

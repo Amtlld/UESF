@@ -138,11 +138,44 @@ evaluation:
 
 ---
 
+## UDA 实验中的数据泄露防护
+
+UDA（无监督域自适应）实验引入了源域/目标域的划分，带来额外的泄露风险。UESF 提供以下防护：
+
+### 源域/目标域隔离
+
+数据集内 UDA（`type: intra-dataset`）按 `dimension`（subject 或 session）将数据分为源域和目标域，保证同一被试/会话的数据不会同时出现在源域和目标域。
+
+```yaml
+uda:
+  type: intra-dataset
+  dimension: subject    # 按被试隔离源域和目标域
+  strategy: k-fold
+  k-folds: -1           # 每个被试轮流做目标域
+```
+
+### Fit-on-Source 变换
+
+UDA 模式下，在线变换（Z-Score 等）的 `fit()` **仅在源域训练数据上执行**，然后 `transform()` 统一应用到源域和目标域的所有子集。这确保目标域的统计信息不会通过变换参数泄露给模型。
+
+### Transductive vs Inductive
+
+- **Transductive**：目标域的全部数据同时用于无监督训练和最终评估。这是 UDA 文献中的标准设定，不存在目标域的 train/test 泄露问题，因为目标域标签在训练中不被使用。
+- **Inductive**：目标域被进一步划分为训练集和测试集。`target_split` 配置控制划分方式，确保目标域的测试数据在训练过程中完全不可见。
+
+---
+
 ## 快速检查清单
 
 在提交实验结果前，检查以下配置：
 
+**常规实验：**
 - [ ] `split.dimension` 设置为 `subject`（或你研究问题对应的正确维度，而非 `none`）
 - [ ] 全局 Z-Score 标准化配置在 `transforms` 中，而非在 `preprocess.yml` 的 `data` 流中
 - [ ] `transforms.fit_on` 设置为 `train`
 - [ ] 实验配置了 `seed` 确保可复现性
+
+**UDA 实验（额外检查）：**
+- [ ] `uda.dimension` 设置正确（`subject` 或 `session`）
+- [ ] 跨数据集 UDA 已配置 `alignment`（通道和标签对齐）
+- [ ] Trainer 的 `training_step` 不使用 `batch["target"]` 的标签进行有监督训练
