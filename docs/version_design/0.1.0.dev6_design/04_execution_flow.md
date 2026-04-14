@@ -17,9 +17,21 @@ load datasets → alignment (if multi-dataset)
 
 > **val_ratio 换算**：`ConfigValidator.normalize()` 在 K-Fold 场景中自动将用户配置的 `val_ratio`（整体比例）换算为 `val_ratio_in_train = val_ratio / (1 - 1/k)`，传给 `KFoldSplitter`。用户无感知。
 
+> **Transform fit 策略（Regular 模式）**：仅在 train 集上 fit，apply 到 train/val/test。验证集和测试集不参与 fit，以避免数据泄漏。
+
 **自动通道映射规则（Regular 模式）**：
 - 单数据集：channel name = `"main"`
 - 多数据集 + `dimension=dataset`：所有训练集数据合并到 `"main"` 通道
+
+> **多数据集合并策略（`dimension=dataset`）**：
+> - 各数据集将前三维展平：`[n_subjects, n_sessions, n_recordings, n_channels, n_samples]` → `[N_i, n_channels, n_samples]`
+> - 属于同一 phase 的数据集沿 axis=0 concat：`[sum(N_i), n_channels, n_samples]` → 构建 `"main"` 通道 dataloader
+> - `DatasetLevelSplitter` 返回的是 alias 级别的划分（哪些数据集做 train / test），不涉及 sample 级索引
+> - `get_groups()` 不适用于 `dimension=dataset`，仅在数据集内部按 subject / session / recording 分组时使用
+> - 合并前提：
+>   - `n_channels`：由 `alignment.channel: intersection` 保证一致
+>   - `n_samples`（采样点数）：由用户在预处理阶段保证一致（统一采样率和时间窗口），框架在合并时校验，不一致则抛出 `ShapeMismatchError`
+>   - 采样率：框架检查各数据集元信息中的采样率，不一致时发出 warning（采样点数可能一致但采样率不同，意味着时间窗口长度不同）
 
 ## 4.2 UDA 模式流程
 
@@ -50,6 +62,11 @@ load datasets → alignment (if cross-dataset)
 | test | `"main"` | 目标域测试集（transductive 时与 target train 相同数据） |
 
 > Trainer 的 `training_step(batch)` 签名不变。UDA Trainer 自行从 `batch["source"]` 和 `batch["target"]` 中取数据，实现域适应逻辑。
+
+> **Transform fit 策略（UDA 模式）**：
+> - 仅在 **source_train** 上 fit，apply 到所有通道（source_train / source_val / target_train / target_val / target_test）
+> - 目标域数据**不参与** fit，以避免目标域统计信息泄漏到训练阶段
+> - 跨数据集场景下，各数据集的数据使用同一组 fit 参数（源域训练集统计量）进行 transform
 
 ## 4.3 ValSplit 维度分组处理
 
@@ -103,3 +120,34 @@ for d_idx, domain_fold in enumerate(domain_splitter.split(...)):
         ))
 return all_splits
 ```
+
+## 4.5 结果聚合策略
+
+`k_fold_aggregation` 的两种模式：
+
+| 模式 | 语义 | 适用场景 |
+|:-----|:-----|:---------|
+| `concat` | 将所有 fold 的预测结果拼接后，在全量预测上计算一次 metric | 每个样本恰好被测试一次的场景（如标准 k-fold） |
+| `mean_std` | 每个 fold 独立计算 metric，最终报告 mean ± std | 各 fold 测试集可能重叠或规模不一致的场景 |
+
+**聚合层次**：
+
+- **Regular k-fold**：在所有 fold 上聚合
+- **UDA 嵌套折叠**（domain fold × inner fold）：展平后视为一维 fold 列表，统一聚合。`fold_info` 保留层次信息供用户按需分析
+- **跨数据集 `dimension=dataset`**：每个 fold 的测试集为单个数据集，聚合时同时报告各 fold（即各测试数据集）的独立 metric 和整体聚合 metric
+
+## 4.6 随机性管理
+
+- 全局 `seed` 作为基础种子，所有随机操作从该种子派生
+- 多层划分时，每层使用独立的 `numpy.random.Generator`，种子按 `seed + layer_offset` 派生，确保各层随机性独立且可复现：
+  - domain split: `seed + 0`
+  - source inner split: `seed + 1`
+  - target inner split: `seed + 2`
+- 每个 fold 内 model 权重初始化和 dataloader shuffle 使用 `seed + fold_idx` 派生，确保各 fold 间随机性不同但可复现
+- **可复现保证**：相同配置 + 相同 seed → 完全可复现的划分结果和训练过程（前提：单 GPU、确定性算法模式）
+
+## 4.7 多 fold 场景下的 Checkpoint
+
+- 每个 fold 独立保存 best checkpoint，路径格式：`{output_dir}/fold_{idx}/best.pt`
+- `checkpoint_metric` 在每个 fold 内独立生效（基于该 fold 的 val metric 选择最优模型）
+- 实验结束后不保留所有 fold 的 checkpoint，仅保留 best（可通过配置开启全量保留）

@@ -14,3 +14,21 @@
 | R10 | 源域无测试集 | `source.split` 不含 `strategy`、`test_ratio`、`train_ratio` |
 | R11 | 域维度与内部维度不同 | `domain.dimension` ≠ `source.split.dimension` 且 `domain.dimension` ≠ `target.split.dimension` |
 | R12 | target 计数互斥 | `domain` 中 `target_count` 和 `target_ratio` 不可同时出现 |
+| R13 | dataset holdout 需 assign | `split.dimension=dataset` + `strategy=holdout` → `assign` 必填，且 `assign` 中的 alias 须覆盖所有声明的 datasets |
+| R14 | dataset k-fold 的 k 值约束 | `split.dimension=dataset` + `strategy=k-fold` → `k == -1` 或 `k == len(datasets)` |
+| R15 | val_ratio 值域 | `0 <= val_ratio < 1`；k-fold 换算后 `val_ratio_in_train < 1` |
+| R16 | 单数据集 alignment 处理 | `len(datasets) == 1` 时若存在 `alignment` 块，忽略并发出 warning |
+
+---
+
+## 边界条件处理
+
+以下场景需在运行时（数据加载后、划分前）进行检查，因为涉及实际数据的分组数量，无法在纯配置校验阶段完成：
+
+| 场景 | 处理方式 |
+|:-----|:---------|
+| 任意维度分组数为 1 | 抛出 `SplitError`。仅有 1 组时无法进行任何有意义的切分（无论 holdout/k-fold/ValSplit），一律拦截 |
+| `val_ratio=0`（ValSplit 或 Split Block） | 合法。`val_indices` 为空数组，不构建 val dataloader，Trainer 跳过验证步骤 |
+| 分组后组数 < 所需切分数量（如 2 组但 `val_ratio=0.4`，训练只剩 1 组） | 运行时 warning，不阻断。允许退化但记录日志 |
+| `target_count` 或 `target_ratio` 换算后 ≥ 实际组数 | 抛出 `SplitError`（目标域不能占满所有组，源域不能为空） |
+| `k` > 分组数 | 抛出 `SplitError`（折数不能超过组数） |
