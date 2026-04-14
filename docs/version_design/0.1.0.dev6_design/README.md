@@ -18,3 +18,4 @@
 | 06 | [变更边界](06_change_boundary.md) | 与现有模块的变更程度说明 |
 | 07 | [配置校验规则](07_config_validation_rules.md) | 12 条配置校验规则汇总 |
 | 08 | [设计优势总结](08_design_summary.md) | 7 项设计优势 |
+| 09 | [训练过程监测](09_training_logger.md) | TensorBoard 集成方案、Logger 协议、多 fold 日志结构 |

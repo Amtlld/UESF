@@ -88,6 +88,8 @@ training:
   optimizer:
     name: adam
     params: { lr: 0.001 }
+  logging:
+    backend: tensorboard
 
 evaluation:
   metrics: [accuracy, f1_score]
@@ -442,14 +444,16 @@ training:
     patience: int
     mode: min | max
   gradient_clip: float            # 可选
+  logging:                        # 可选，省略则不记录训练日志
+    backend: tensorboard          # 日志后端，目前仅支持 tensorboard
+    log_every_n_epochs: int       # 每 N 个 epoch 记录一次，默认 1
+    log_graph: bool               # 是否记录模型计算图，默认 false
 
 # ---- 评估 ----
 evaluation:
   metrics: [string]               # 默认 [accuracy]
   k_fold_aggregation: concat | mean_std  # 默认 concat
 
-# ---- 日志 ----
-logging:                          # 可选
-  use_wandb: bool
-  checkpoint_metric: string
+# ---- 训练过程监测 ----
+# 位于 training 块内部，见下方 training.logging
 ```

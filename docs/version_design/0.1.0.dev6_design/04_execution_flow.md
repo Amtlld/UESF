@@ -11,7 +11,8 @@ load datasets → alignment (if multi-dataset)
         → fit transforms on train, apply to all
         → build dataloaders (auto-channel)
         → init fresh model + trainer
-        → runner.run() → fold_result
+        → create_logger(logging_config, fold_dir/tb_logs)  # 可选
+        → runner.run(logger=logger) → fold_result
     → aggregate fold results → final_results
 ```
 
@@ -47,7 +48,8 @@ load datasets → alignment (if cross-dataset)
             val:   {"source_val": src_val, "target_val": tgt_val}
             test:  {"main": tgt_test}
         → init fresh model + trainer
-        → runner.run() → fold_result
+        → create_logger(logging_config, fold_dir/tb_logs)  # 可选
+        → runner.run(logger=logger) → fold_result
     → aggregate results → final_results
 ```
 
@@ -146,8 +148,18 @@ return all_splits
 - 每个 fold 内 model 权重初始化和 dataloader shuffle 使用 `seed + fold_idx` 派生，确保各 fold 间随机性不同但可复现
 - **可复现保证**：相同配置 + 相同 seed → 完全可复现的划分结果和训练过程（前提：单 GPU、确定性算法模式）
 
-## 4.7 多 fold 场景下的 Checkpoint
+## 4.7 多 fold 场景下的 Checkpoint 与日志
+
+每个 fold 的输出目录结构：
+
+```
+{output_dir}/fold_{idx}/
+├── best.pt                   # best checkpoint
+└── tb_logs/                  # TensorBoard 日志（仅在配置 logging 时生成）
+    └── events.out.tfevents.*
+```
 
 - 每个 fold 独立保存 best checkpoint，路径格式：`{output_dir}/fold_{idx}/best.pt`
 - `checkpoint_metric` 在每个 fold 内独立生效（基于该 fold 的 val metric 选择最优模型）
 - 实验结束后不保留所有 fold 的 checkpoint，仅保留 best（可通过配置开启全量保留）
+- TensorBoard 日志每个 fold 独立写入，`tensorboard --logdir {output_dir}` 可一次查看所有 fold 的训练曲线

@@ -5,5 +5,6 @@
 3. **正交组合**：域划分和域内划分独立配置，可自由组合
 4. **接口一致**：DomainSplitter 拆为 DatasetDomainSplitter / DimensionDomainSplitter，各自接口签名统一，分发逻辑由 UDAOrchestrator 封装
 5. **可追溯**：UDASplitResult 携带 fold_info，嵌套折叠展平后仍可追溯来源
-6. **最小改动**：Runner、Evaluator、BaseTrainer、BaseModel 完全不变，变更集中在 splitter 和 experiment_manager
+6. **最小改动**：Evaluator、BaseTrainer、BaseModel 完全不变，Runner 仅微调（新增可选 logger 参数），变更集中在 splitter 和 experiment_manager
 7. **可扩展**：新的对齐策略、新的划分维度均可通过注册表模式扩展，无需修改已有代码
+8. **可观测**：TrainingLogger 协议解耦日志后端，TensorBoard 开箱即用，每个 fold 独立 logdir 支持多折对比分析

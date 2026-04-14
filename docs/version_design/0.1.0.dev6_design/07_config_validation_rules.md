@@ -18,6 +18,8 @@
 | R14 | dataset k-fold 的 k 值约束 | `split.dimension=dataset` + `strategy=k-fold` → `k == -1` 或 `k == len(datasets)` |
 | R15 | val_ratio 值域 | `0 <= val_ratio < 1`；k-fold 换算后 `val_ratio_in_train < 1` |
 | R16 | 单数据集 alignment 处理 | `len(datasets) == 1` 时若存在 `alignment` 块，忽略并发出 warning |
+| R17 | logging.backend 合法值 | `training.logging.backend` 仅允许 `"tensorboard"`，其他值抛出 `TypeMismatchError` |
+| R18 | log_every_n_epochs 正整数 | `training.logging.log_every_n_epochs` 必须为正整数（> 0），否则抛出 `TypeMismatchError` |
 
 ---
 

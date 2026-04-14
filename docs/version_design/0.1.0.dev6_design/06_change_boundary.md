@@ -2,7 +2,7 @@
 
 | 模块 | 变更程度 | 说明 |
 |:-----|:---------|:-----|
-| `runner.py` | **不变** | 仍接收 train/val/test dataloader，接口完全兼容 |
+| `runner.py` | **微调** | `run()` 新增可选参数 `logger` 和 `log_every_n_epochs`，无 logger 时行为完全不变 |
 | `evaluator.py` | **不变** | 仍聚合 fold 结果 |
 | `dataset.py` | **不变** | EEGDataset 封装不变 |
 | `transforms.py` | **不变** | fit/transform 接口不变 |
@@ -12,5 +12,6 @@
 | `experiment_manager.py` | **重构** | 提取 `ConfigValidator`（normalize + validate 分离）+ `ExperimentExecutor`，策略模式分发 |
 | `BaseTrainer` | **不变** | `training_step(batch)` 签名不变 |
 | `BaseModel` | **不变** | `forward(x)` 签名不变 |
+| `logger.py` | **新增** | TrainingLogger 协议 + TensorBoardLogger 实现，位于 `experiment/` |
 
 > 本次重构为 UESF 初版开发阶段的 breaking change，不考虑后向兼容。

@@ -17,8 +17,9 @@ src/uesf/experiment/
 ├── transforms.py             # ZScoreNormalize 等（保持现有）
 ├── dataset.py                # EEGDataset（保持现有）
 ├── dataloader_builder.py     # 重构：自动通道映射
+├── logger.py                 # 新增：TrainingLogger 协议 + TensorBoardLogger 实现
 ├── evaluator.py              # 保持现有
-└── runner.py                 # 保持现有
+└── runner.py                 # 微调：run() 新增可选 logger 参数
 
 src/uesf/managers/
 └── experiment_manager.py     # 重构：提取 ConfigValidator + ExperimentExecutor
@@ -76,12 +77,26 @@ src/uesf/managers/
 │                  │  │                        │
 │ split →          │  │ domain_split →         │
 │ for fold:        │  │ for domain_fold:       │
-│   build_data()   │  │   inner_split() →      │
-│   train()        │  │   for inner_fold:      │
+│   create_logger()│  │   inner_split() →      │
+│   build_data()   │  │   for inner_fold:      │
+│   train()        │  │     create_logger()    │
 │   evaluate()     │  │     build_data()       │
 │                  │  │     train()             │
 │                  │  │     evaluate()          │
 └──────────────────┘  └───────────────────────┘
+          │                       │
+          └───────────┬───────────┘
+                      ▼
+        ┌──────────────────────────┐
+        │     TrainingLogger       │
+        │       (Protocol)         │
+        │                          │
+        │ log_scalars(dict, step)  │
+        │ log_graph(model, input)  │
+        │ close()                  │
+        │                          │
+        │ 实现: TensorBoardLogger  │
+        └──────────────────────────┘
 ```
 
 ### 3.3.1 Executor 与 Strategy 接口定义
@@ -470,4 +485,38 @@ class DataloaderBuilder:
             DataLoader，每个 batch 为 dict[str, Tensor]
         """
         ...
+```
+
+### 3.4.8 训练日志
+
+```python
+# ---- experiment/logger.py ----
+
+@runtime_checkable
+class TrainingLogger(Protocol):
+    """训练日志写入协议。Runner 仅依赖此协议。"""
+    
+    def log_scalars(self, tag_value_dict: dict[str, float], step: int) -> None:
+        """记录一组标量指标。"""
+        ...
+    
+    def log_graph(self, model: torch.nn.Module, input_sample: torch.Tensor) -> None:
+        """记录模型计算图（可选）。"""
+        ...
+    
+    def close(self) -> None:
+        """释放资源。"""
+        ...
+
+class TensorBoardLogger:
+    """基于 torch.utils.tensorboard 的实现。延迟 import SummaryWriter。"""
+    
+    def __init__(self, log_dir: Path) -> None: ...
+    def log_scalars(self, tag_value_dict: dict[str, float], step: int) -> None: ...
+    def log_graph(self, model: torch.nn.Module, input_sample: torch.Tensor) -> None: ...
+    def close(self) -> None: ...
+
+def create_logger(config: dict, log_dir: Path) -> TrainingLogger | None:
+    """根据 training.logging 配置创建 logger，未配置时返回 None。"""
+    ...
 ```
