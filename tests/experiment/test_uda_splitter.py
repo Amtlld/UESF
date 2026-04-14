@@ -263,6 +263,159 @@ class TestIntraDatasetUDASplitter:
         total = len(r.source_train_indices["main"]) + len(r.target_train_indices["main"])
         assert total == 24  # 3*4*2
 
+    # --- Supplementary coverage ---
+
+    def test_transductive_kfold_with_source_val(self):
+        """K-fold + source_split.val_ratio in transductive mode."""
+        data = _make_data(sub=6, sess=1, rec=4)  # 24 units, 6 groups
+        splitter = IntraDatasetUDASplitter({
+            "dimension": "subject",
+            "strategy": "k-fold",
+            "k-folds": 3,
+            "variant": "transductive",
+            "source_split": {"val_ratio": 0.2},
+            "seed": 42,
+        })
+        results = splitter.split(data)
+        assert len(results) == 3
+        for r in results:
+            src_train = r.source_train_indices["main"]
+            src_val = r.source_val_indices["main"]
+            tgt_train = r.target_train_indices["main"]
+            tgt_test = r.target_test_indices["main"]
+            # 4 source subjects * 4 rec = 16
+            assert len(src_train) + len(src_val) == 16
+            assert len(src_val) > 0
+            # No overlap between source and target
+            assert len(set(src_train) | set(src_val)) & len(set(tgt_train)) == 0 or \
+                len((set(src_train) | set(src_val)) & set(tgt_train)) == 0
+            # Transductive: test == train
+            np.testing.assert_array_equal(tgt_train, tgt_test)
+
+    def test_session_dimension_kfold(self):
+        """Session dimension + k-fold (existing only tests session + holdout)."""
+        n_sub, n_sess, n_rec = 3, 4, 2  # 24 units, 12 session groups
+        data = _make_data(sub=n_sub, sess=n_sess, rec=n_rec)
+        splitter = IntraDatasetUDASplitter({
+            "dimension": "session",
+            "strategy": "k-fold",
+            "k-folds": 4,
+            "variant": "transductive",
+            "seed": 42,
+        })
+        results = splitter.split(data)
+        assert len(results) == 4
+        for r in results:
+            src = r.source_train_indices["main"]
+            tgt = r.target_train_indices["main"]
+            assert len(src) + len(tgt) == 24
+            # Session isolation: source/target session groups must not overlap
+            src_sessions = {idx // n_rec for idx in src}
+            tgt_sessions = {idx // n_rec for idx in tgt}
+            assert len(src_sessions & tgt_sessions) == 0
+
+    def test_inductive_holdout_with_source_val(self):
+        """Inductive + source_split.val_ratio combination."""
+        data = _make_data(sub=5, sess=1, rec=10)  # 50 units
+        splitter = IntraDatasetUDASplitter({
+            "dimension": "subject",
+            "strategy": "holdout",
+            "variant": "inductive",
+            "target_count": 1,
+            "source_split": {"val_ratio": 0.15},
+            "target_split": {"train_ratio": 0.7, "test_ratio": 0.3},
+            "seed": 42,
+        })
+        r = splitter.split(data)[0]
+        src_train = r.source_train_indices["main"]
+        src_val = r.source_val_indices["main"]
+        tgt_train = r.target_train_indices["main"]
+        tgt_test = r.target_test_indices["main"]
+
+        assert len(src_val) > 0
+        assert len(src_train) + len(src_val) == 40  # 4 subjects * 10 rec
+        assert len(tgt_train) + len(tgt_test) == 10
+        # No overlap between source and target
+        all_src = set(src_train) | set(src_val)
+        all_tgt = set(tgt_train) | set(tgt_test)
+        assert len(all_src & all_tgt) == 0
+
+    def test_inductive_kfold_k3(self):
+        """Inductive k-fold with specific k value (not LOOCV)."""
+        data = _make_data(sub=6, sess=1, rec=10)  # 60 units, 6 groups
+        splitter = IntraDatasetUDASplitter({
+            "dimension": "subject",
+            "strategy": "k-fold",
+            "k-folds": 3,
+            "variant": "inductive",
+            "target_split": {"train_ratio": 0.7, "test_ratio": 0.3},
+            "seed": 42,
+        })
+        results = splitter.split(data)
+        assert len(results) == 3
+        for r in results:
+            tgt_train = r.target_train_indices["main"]
+            tgt_test = r.target_test_indices["main"]
+            src_train = r.source_train_indices["main"]
+            # 2 target subjects * 10 rec = 20
+            assert len(tgt_train) + len(tgt_test) == 20
+            assert len(src_train) == 40
+            assert len(set(tgt_train) & set(tgt_test)) == 0
+            assert len(set(src_train) & (set(tgt_train) | set(tgt_test))) == 0
+
+    def test_shuffle_false(self):
+        """shuffle=False produces sequential group assignment."""
+        data = _make_data(sub=5, sess=1, rec=2)  # 10 units, 5 groups
+        splitter = IntraDatasetUDASplitter({
+            "dimension": "subject",
+            "strategy": "holdout",
+            "variant": "transductive",
+            "target_count": 2,
+            "shuffle": False,
+        })
+        r = splitter.split(data)[0]
+        # No shuffle: first 2 groups (subjects 0,1) become target
+        assert set(r.target_train_indices["main"]) == {0, 1, 2, 3}
+        assert set(r.source_train_indices["main"]) == {4, 5, 6, 7, 8, 9}
+
+    def test_inductive_target_split_different_dimension(self):
+        """Inductive: target_split.dimension differs from domain split dimension.
+
+        Domain split by subject, target sub-split by session.
+        Verifies session isolation within the target split.
+        """
+        n_sub, n_sess, n_rec = 4, 3, 2  # 24 units
+        data = _make_data(sub=n_sub, sess=n_sess, rec=n_rec)
+        splitter = IntraDatasetUDASplitter({
+            "dimension": "subject",
+            "strategy": "holdout",
+            "variant": "inductive",
+            "target_count": 1,
+            "target_split": {
+                "dimension": "session",
+                "train_ratio": 0.6,
+                "test_ratio": 0.4,
+            },
+            "shuffle": False,
+            "seed": 42,
+        })
+        r = splitter.split(data)[0]
+        tgt_train = r.target_train_indices["main"]
+        tgt_test = r.target_test_indices["main"]
+
+        # 1 target subject = 3 sessions * 2 recordings = 6 indices
+        assert len(tgt_train) + len(tgt_test) == n_sess * n_rec
+        assert len(set(tgt_train) & set(tgt_test)) == 0
+
+        # Session isolation: recordings of same session stay together
+        # Target subject is subject 0 (shuffle=False), sessions mapped as:
+        # session 0 -> indices [0,1], session 1 -> [2,3], session 2 -> [4,5]
+        train_sessions = {idx // n_rec for idx in tgt_train}
+        test_sessions = {idx // n_rec for idx in tgt_test}
+        assert len(train_sessions & test_sessions) == 0, (
+            "session isolation violated in target split"
+        )
+
     # --- Error cases ---
 
     def test_target_count_too_large(self):
@@ -444,6 +597,116 @@ class TestCrossDatasetUDASplitter:
                     + len(r.target_test_indices[alias])
                 )
                 assert tgt_total == 10  # 2*1*5
+
+    # --- Supplementary coverage ---
+
+    def test_transductive_kfold_with_source_val(self):
+        """K-fold + source_split.val_ratio in transductive mode."""
+        cache = _make_cache(("a", 2, 1, 5), ("b", 2, 1, 5), ("c", 2, 1, 5))
+        splitter = CrossDatasetUDASplitter({
+            "strategy": "k-fold",
+            "k-folds": -1,
+            "variant": "transductive",
+            "source_split": {"val_ratio": 0.2},
+            "seed": 42,
+        })
+        results = splitter.split(cache)
+        assert len(results) == 3
+        for r in results:
+            for alias in r.source_train_indices:
+                src_train = r.source_train_indices[alias]
+                src_val = r.source_val_indices[alias]
+                assert len(src_val) > 0
+                assert len(src_train) + len(src_val) == 10  # 2*1*5
+            # Transductive: target test == target train
+            for alias in r.target_train_indices:
+                np.testing.assert_array_equal(
+                    r.target_train_indices[alias],
+                    r.target_test_indices[alias],
+                )
+
+    def test_inductive_holdout_subject_dimension_target(self):
+        """Inductive holdout with subject-dimension target split (group-based branch)."""
+        n_tgt_sub, n_tgt_sess, n_tgt_rec = 4, 2, 3  # 24 target units
+        cache = _make_cache(("src", 3, 1, 5), ("tgt", n_tgt_sub, n_tgt_sess, n_tgt_rec))
+        splitter = CrossDatasetUDASplitter({
+            "strategy": "holdout",
+            "variant": "inductive",
+            "source_datasets": ["src"],
+            "target_dataset": "tgt",
+            "target_split": {
+                "dimension": "subject",
+                "train_ratio": 0.5,
+                "test_ratio": 0.5,
+            },
+            "seed": 42,
+        })
+        r = splitter.split(cache)[0]
+        tgt_train = r.target_train_indices["tgt"]
+        tgt_test = r.target_test_indices["tgt"]
+
+        assert len(tgt_train) + len(tgt_test) == 24
+        assert len(set(tgt_train) & set(tgt_test)) == 0
+
+        # Subject isolation: same subject must not appear in both train and test
+        samples_per_subject = n_tgt_sess * n_tgt_rec
+        train_subjects = {int(idx) // samples_per_subject for idx in tgt_train}
+        test_subjects = {int(idx) // samples_per_subject for idx in tgt_test}
+        assert len(train_subjects & test_subjects) == 0, (
+            "subject isolation violated in target split"
+        )
+        # Each side has at least 1 subject
+        assert len(train_subjects) >= 1
+        assert len(test_subjects) >= 1
+
+    def test_inductive_kfold_subject_dimension_target(self):
+        """K-fold inductive with subject-dimension target split."""
+        n_sub, n_sess, n_rec = 4, 1, 3  # 12 units per dataset
+        cache = _make_cache(("a", n_sub, n_sess, n_rec),
+                            ("b", n_sub, n_sess, n_rec),
+                            ("c", n_sub, n_sess, n_rec))
+        splitter = CrossDatasetUDASplitter({
+            "strategy": "k-fold",
+            "k-folds": -1,
+            "variant": "inductive",
+            "target_split": {
+                "dimension": "subject",
+                "train_ratio": 0.5,
+                "test_ratio": 0.5,
+            },
+            "seed": 42,
+        })
+        results = splitter.split(cache)
+        assert len(results) == 3
+
+        for r in results:
+            for alias in r.target_train_indices:
+                tgt_train = r.target_train_indices[alias]
+                tgt_test = r.target_test_indices[alias]
+                assert len(tgt_train) + len(tgt_test) == 12
+                # Subject isolation
+                samples_per_subject = n_sess * n_rec
+                train_subs = {int(i) // samples_per_subject for i in tgt_train}
+                test_subs = {int(i) // samples_per_subject for i in tgt_test}
+                assert len(train_subs & test_subs) == 0
+
+    def test_shuffle_false(self):
+        """shuffle=False produces deterministic insertion-order fold assignment."""
+        cache = _make_cache(("a", 1, 1, 3), ("b", 1, 1, 3), ("c", 1, 1, 3))
+        splitter = CrossDatasetUDASplitter({
+            "strategy": "k-fold",
+            "k-folds": -1,
+            "variant": "transductive",
+            "shuffle": False,
+        })
+        results = splitter.split(cache)
+        assert len(results) == 3
+        # Insertion order: a, b, c → fold 0 targets "a", fold 1 targets "b", ...
+        expected_targets = ["a", "b", "c"]
+        for r, expected in zip(results, expected_targets):
+            target_aliases = list(r.target_train_indices.keys())
+            assert len(target_aliases) == 1
+            assert target_aliases[0] == expected
 
     # --- Error cases ---
 

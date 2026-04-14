@@ -439,7 +439,7 @@ class IntraDatasetUDASplitter:
         results = []
         for target_group_idx, source_group_idx in folds:
             results.append(
-                self._build_uda_result(groups, source_group_idx, target_group_idx, alias)
+                self._build_uda_result(groups, source_group_idx, target_group_idx, alias, data)
             )
         return results
 
@@ -497,6 +497,7 @@ class IntraDatasetUDASplitter:
         source_group_idx: list[int],
         target_group_idx: list[int],
         alias: str,
+        data: np.ndarray,
     ) -> UDASplitResult:
         source_all = (
             np.concatenate([groups[i] for i in source_group_idx])
@@ -514,7 +515,7 @@ class IntraDatasetUDASplitter:
 
         # Target: transductive vs inductive
         if self.variant == "inductive" and self.target_split:
-            tgt_train, tgt_val, tgt_test = self._inductive_split(target_all)
+            tgt_train, tgt_val, tgt_test = self._inductive_split(target_all, data)
         else:
             # Transductive: all target data for both training and testing
             tgt_train = target_all
@@ -539,16 +540,41 @@ class IntraDatasetUDASplitter:
         return indices[:-n_val], indices[-n_val:]
 
     def _inductive_split(
-        self, target_indices: np.ndarray,
+        self, target_indices: np.ndarray, data: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Sub-split target indices into train(/val)/test for inductive UDA."""
         cfg = self.target_split
         train_ratio = cfg.get("train_ratio", 0.7)
         val_ratio = cfg.get("val_ratio", 0.0)
-        test_ratio = cfg.get("test_ratio", 0.3)
+        dimension = cfg.get("dimension", "none")
 
+        # If data is 5-D and dimension isn't "none"/"recording", use group-based split
+        if data.ndim == 5 and dimension not in ("none", "recording"):
+            groups = _get_groups(data, dimension)
+            target_set = set(target_indices.tolist())
+            # Keep only groups whose indices are entirely within target domain
+            target_groups = [g for g in groups if set(g.tolist()) <= target_set]
+            n = len(target_groups)
+            indices = list(range(n))
+            rng = random.Random(self.seed)
+            rng.shuffle(indices)
+
+            n_train = max(1, round(n * train_ratio))
+            n_val = max(0, round(n * val_ratio))
+            if n_train + n_val >= n:
+                n_val = max(0, n - n_train - 1)
+
+            train_g = [target_groups[i] for i in indices[:n_train]]
+            val_g = [target_groups[i] for i in indices[n_train:n_train + n_val]]
+            test_g = [target_groups[i] for i in indices[n_train + n_val:]]
+
+            train = np.concatenate(train_g) if train_g else np.array([], dtype=int)
+            val = np.concatenate(val_g) if val_g else np.array([], dtype=int)
+            test = np.concatenate(test_g) if test_g else np.array([], dtype=int)
+            return train, val, test
+
+        # Simple ratio-based split on flat indices
         n = len(target_indices)
-        # Shuffle target indices deterministically
         rng = random.Random(self.seed)
         idx = list(target_indices)
         rng.shuffle(idx)
