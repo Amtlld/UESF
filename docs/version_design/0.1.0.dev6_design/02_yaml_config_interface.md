@@ -63,7 +63,7 @@ dimension: dataset | subject | session
 **场景 A：单数据集，subject 级 K-Fold**
 
 ```yaml
-experiment-name: regular_kfold_subject
+experiment_name: regular_kfold_subject
 seed: 42
 
 datasets:
@@ -98,7 +98,7 @@ evaluation:
 **场景 B：单数据集，recording 级 holdout**
 
 ```yaml
-experiment-name: regular_holdout_recording
+experiment_name: regular_holdout_recording
 seed: 42
 
 datasets:
@@ -121,7 +121,7 @@ evaluation: { metrics: [accuracy] }
 **场景 C：跨数据集常规训练 — Holdout（显式指派）**
 
 ```yaml
-experiment-name: cross_dataset_regular
+experiment_name: cross_dataset_regular
 seed: 42
 
 datasets:
@@ -142,11 +142,14 @@ split:
   assign:
     train: [bcic4_2a, bcic4_2b]
     test: [physionet]
+  val_ratio: 0.1
 
 model: { name: EEGNet }
 training: { epochs: 100, batch_size: 64 }
 evaluation: { metrics: [accuracy] }
 ```
+
+> **验证集处理**：`dimension=dataset` + `holdout` 时不支持 `assign.val`。验证集从 `assign.train` 指定的训练数据集展平合并后，按 `val_ratio` 随机切出（默认 `shuffle=true`）。若未指定 `val_ratio`，则无验证集。
 
 **场景 D：跨数据集 K-Fold（各数据集轮流做测试集）**
 
@@ -155,7 +158,10 @@ split:
   strategy: k-fold
   dimension: dataset
   k: -1   # leave-one-dataset-out
+  val_ratio: 0.1
 ```
+
+> **验证集处理**：`dimension=dataset` + `k-fold` 时，每折的测试集为一个数据集，其余数据集作为训练集。验证集通过在训练集内部按 `val_ratio` 切分产生（按 recording 维度随机抽取），复用顶层 `split.val_ratio` 配置。若未指定 `val_ratio`，则该折无验证集。
 
 > **Regular 模式小结**：`split` 统一位于顶层，使用 Split Block 结构。`dimension` 可为 `subject | session | recording | dataset` 四选一。当 `dimension: dataset` 时需声明多个 datasets 并配置 alignment。
 
@@ -220,7 +226,7 @@ uda:
 **UDA 场景 A：跨数据集 UDA — Transductive — Holdout**
 
 ```yaml
-experiment-name: cross_dataset_uda_transductive
+experiment_name: cross_dataset_uda_transductive
 seed: 42
 
 datasets:
@@ -264,7 +270,7 @@ evaluation: { metrics: [accuracy, f1_score] }
 **UDA 场景 B：数据集内 UDA — Subject 级 K-Fold — Inductive**
 
 ```yaml
-experiment-name: intra_dataset_uda_kfold_inductive
+experiment_name: intra_dataset_uda_kfold_inductive
 seed: 42
 
 datasets:
@@ -353,7 +359,7 @@ uda:
 ```yaml
 # ==================== 实验 YAML 完整结构 ====================
 
-experiment-name: string           # 必填
+experiment_name: string           # 必填
 description: string               # 可选
 seed: int                         # 可选，默认 42
 
@@ -382,9 +388,8 @@ split:                            # mode=regular 时必填
   val_ratio: float
   test_ratio: float
   # holdout + dimension=dataset 参数:
-  assign:                         # 显式指派数据集到各阶段
+  assign:                         # 显式指派数据集到各阶段（不支持 assign.val）
     train: [alias, ...]
-    val: [alias, ...]             # 可选
     test: [alias, ...]
   # k-fold 参数:
   k: int                          # 折数，-1 = leave-one-out
@@ -429,6 +434,9 @@ trainer:                          # 可选，默认 DummyTrainer
   name: string
   params: { ... }
 
+# ---- 设备 ----
+device: string                    # 可选，覆盖全局配置中的 device 设置（如 "cuda:0"），省略时使用全局配置（默认 "cpu"）
+
 # ---- 训练配置 ----
 training:
   epochs: int
@@ -444,6 +452,10 @@ training:
     patience: int
     mode: min | max
   gradient_clip: float            # 可选
+  checkpoint:                     # 可选，省略则不保存 checkpoint
+    metric: string                # 用于选择 best model 的指标名（如 "val_accuracy"）
+    mode: min | max               # metric 越小越好还是越大越好，默认 max
+    dir: string                   # checkpoint 保存目录，默认 experiments/results/<experiment_name>/checkpoints
   logging:                        # 可选，省略则不记录训练日志
     backend: tensorboard          # 日志后端，目前仅支持 tensorboard
     log_every_n_epochs: int       # 每 N 个 epoch 记录一次，默认 1

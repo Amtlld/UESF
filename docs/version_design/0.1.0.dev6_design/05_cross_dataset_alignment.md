@@ -16,6 +16,17 @@ alignment:
 | `mode: uda` + `domain.dimension: dataset` | 自动触发 |
 | 单数据集内实验 | 跳过 |
 
+**对齐时机**：在数据集加载完成后、任何划分操作之前执行。对齐结果直接更新 `dataset_cache`（原地替换），后续划分和训练使用对齐后的数据。
+
+**`n_samples` 校验**：对齐阶段检查各数据集的 `n_samples`（采样点数）是否一致。不一致时抛出 `ShapeMismatchError`。采样率不一致但 `n_samples` 一致时发出 warning（可能意味着时间窗口长度不同）。
+
+**处理流程**：
+
+1. `ChannelAligner.align(datasets)` → 各数据集保留交集通道，返回对齐后的数据和公共通道列表
+2. `LabelAligner.validate(metadata)` → 校验标签一致性
+3. 校验 `n_samples` 一致性
+4. 更新 `dataset_cache` 和 `metadata_cache`
+
 **接口保留**：
 
 - `ChannelAligner` ABC 不变，`CHANNEL_ALIGNER_REGISTRY` 支持后续注册 `interpolation` 等新策略

@@ -123,6 +123,8 @@ for d_idx, domain_fold in enumerate(domain_splitter.split(...)):
 return all_splits
 ```
 
+> **source split 共享**：同一 domain fold 内，源域的 train/val 划分在所有 target inner fold 间共享（即源域只切分一次）。这是有意为之——源域划分与目标域内部折叠正交，每个 inner fold 仅改变目标域的 train/val/test 分配。
+
 ## 4.5 结果聚合策略
 
 `k_fold_aggregation` 的两种模式：
@@ -163,3 +165,9 @@ return all_splits
 - `checkpoint_metric` 在每个 fold 内独立生效（基于该 fold 的 val metric 选择最优模型）
 - 实验结束后不保留所有 fold 的 checkpoint，仅保留 best（可通过配置开启全量保留）
 - TensorBoard 日志每个 fold 独立写入，`tensorboard --logdir {output_dir}` 可一次查看所有 fold 的训练曲线
+
+## 4.8 错误恢复与资源清理
+
+- **fold 级隔离**：单个 fold 训练失败时，捕获异常并记录到该 fold 的 `FoldResult`（标记为 failed），继续执行后续 fold。实验最终结果中包含失败 fold 的信息，聚合指标仅基于成功的 fold 计算。若所有 fold 均失败，实验整体标记为 failed。
+- **Logger 安全关闭**：Logger 使用 context manager 模式（`__enter__` / `__exit__`），确保异常时也能 flush 并关闭。`runner.run()` 中改用 `with logger:` 包裹训练循环。`TrainingLogger` 协议新增 `__enter__` 和 `__exit__` 方法。
+- **DB 状态**：实验开始时标记为 `running`，每个 fold 完成/失败时更新进度，实验结束时根据 fold 结果标记为 `completed` 或 `partial`（部分 fold 失败）或 `failed`（全部失败）。

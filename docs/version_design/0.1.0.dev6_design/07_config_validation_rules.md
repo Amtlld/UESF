@@ -34,3 +34,4 @@
 | 分组后组数 < 所需切分数量（如 2 组但 `val_ratio=0.4`，训练只剩 1 组） | 运行时 warning，不阻断。允许退化但记录日志 |
 | `target_count` 或 `target_ratio` 换算后 ≥ 实际组数 | 抛出 `SplitError`（目标域不能占满所有组，源域不能为空） |
 | `k` > 分组数 | 抛出 `SplitError`（折数不能超过组数） |
+| k-fold 场景下 `val_ratio_in_train` 换算后 > 0.5 | 运行时 warning，提示训练数据占比过低（不阻断） |

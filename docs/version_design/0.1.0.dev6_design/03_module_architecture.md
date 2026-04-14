@@ -112,6 +112,7 @@ class ExperimentContext:
     metadata_cache: dict[str, dict]       # alias → 数据集元信息（采样率等）
     experiment_id: int                    # DB 记录 ID
     output_dir: Path                      # 实验输出目录
+    device: torch.device                  # 实验 YAML device 字段覆盖全局配置，由 ExperimentManager 解析后传入
 
 @dataclass
 class FoldResult:
@@ -120,6 +121,8 @@ class FoldResult:
     fold_info: dict                       # 来自 SplitResult/UDASplitResult 的 fold 描述
     predictions: np.ndarray | None        # concat 模式需要保留预测结果
     labels: np.ndarray | None             # concat 模式需要保留真实标签
+    failed: bool = False                  # 该 fold 是否训练失败
+    error: str | None = None              # 失败时的异常信息
 
 @dataclass
 class ExperimentResult:
@@ -135,14 +138,27 @@ class ExperimentExecutor:
         ...
 
 class RegularExecutionStrategy:
-    """Regular 模式执行策略。"""
+    """Regular 模式执行策略。
+    
+    transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行：
+    1. create_transform(name) 创建 transform 实例
+    2. transform.fit(train_data) — 仅在 train 数据上 fit
+    3. transform.transform(all_data) — 对 train/val/test 统一 transform
+    """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
         """创建 splitter → 遍历 fold → 训练评估 → 返回各 fold 结果。"""
         ...
 
 class UDAExecutionStrategy:
-    """UDA 模式执行策略。"""
+    """UDA 模式执行策略。
+    
+    transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行：
+    1. create_transform(name) 创建 transform 实例
+    2. transform.fit(source_train_data) — 仅在 source_train 数据上 fit
+    3. transform.transform(all_data) — 对所有通道（source_train/source_val/
+       target_train/target_val/target_test）统一 transform
+    """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
         """创建 UDAOrchestrator → 遍历展平后的 fold → 训练评估 → 返回各 fold 结果。"""
@@ -366,6 +382,11 @@ class ValSplitter:
     
     用于 source.split 和 transductive target.split。
     按 dimension 分组后，将 val_ratio 比例的组整体划入验证集。
+    
+    跨数据集场景下，UDAOrchestrator 负责将多个源域数据集展平合并为
+    单一 ndarray 后传入 split()。返回的 SplitResult 中的索引对应合并
+    后的数据。UDAOrchestrator 内部维护合并前各数据集的偏移量映射，
+    以便将合并索引还原回 dict[str, np.ndarray] 形式填入 UDASplitResult。
     """
     
     def __init__(self, dimension: str, val_ratio: float,
@@ -390,26 +411,28 @@ class UDAOrchestrator:
     调用者无需关心具体使用哪个 splitter。
     """
     
-    def __init__(self, uda_config: dict):
-        # 根据 domain.dimension 创建合适的 domain splitter
+    def __init__(self, uda_config: dict, seed: int = 42):
+        base_seed = seed
+        
+        # 根据 domain.dimension 创建合适的 domain splitter（seed + 0）
         domain_cfg = uda_config["domain"]
         if domain_cfg["dimension"] == "dataset":
-            self.domain_splitter = DatasetDomainSplitter(...)
+            self.domain_splitter = DatasetDomainSplitter(..., seed=base_seed)
         else:
-            self.domain_splitter = DimensionDomainSplitter(...)
+            self.domain_splitter = DimensionDomainSplitter(..., seed=base_seed)
         
-        # 源域：ValSplitter
-        self.source_splitter = ValSplitter(...)
+        # 源域：ValSplitter（seed + 1）
+        self.source_splitter = ValSplitter(..., seed=base_seed + 1)
         
-        # 目标域：根据 adaptation 选择
+        # 目标域：根据 adaptation 选择（seed + 2）
         self.adaptation = uda_config["adaptation"]
         target_split_cfg = uda_config.get("target", {}).get("split", {})
         if self.adaptation == "inductive":
             # 完整 Split Block → HoldoutSplitter 或 KFoldSplitter
-            self.target_splitter = create_splitter(target_split_cfg)
+            self.target_splitter = create_splitter(target_split_cfg, seed=base_seed + 2)
         elif target_split_cfg:
             # transductive + 有 ValSplit 配置
-            self.target_splitter = ValSplitter(...)
+            self.target_splitter = ValSplitter(..., seed=base_seed + 2)
         else:
             self.target_splitter = None  # transductive 无 target.split
     
@@ -485,6 +508,16 @@ class DataloaderBuilder:
             DataLoader，每个 batch 为 dict[str, Tensor]
         """
         ...
+
+def _get_sample_input(train_loader, mode: str = "regular") -> torch.Tensor:
+    """从 train_loader 中取第一个 batch，提取模型输入 tensor。
+    
+    Regular 模式：batch["main"][0]（取 data 部分）
+    UDA 模式：batch["source"][0]（取 source data 部分）
+    
+    返回的 tensor 用于 log_graph 的 model trace。
+    """
+    ...
 ```
 
 ### 3.4.8 训练日志
@@ -494,7 +527,10 @@ class DataloaderBuilder:
 
 @runtime_checkable
 class TrainingLogger(Protocol):
-    """训练日志写入协议。Runner 仅依赖此协议。"""
+    """训练日志写入协议。Runner 仅依赖此协议。
+    
+    支持 context manager 模式，确保异常时也能安全关闭。
+    """
     
     def log_scalars(self, tag_value_dict: dict[str, float], step: int) -> None:
         """记录一组标量指标。"""
@@ -506,6 +542,14 @@ class TrainingLogger(Protocol):
     
     def close(self) -> None:
         """释放资源。"""
+        ...
+    
+    def __enter__(self) -> "TrainingLogger":
+        """进入 context manager，返回自身。"""
+        ...
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """退出 context manager，调用 close()。"""
         ...
 
 class TensorBoardLogger:

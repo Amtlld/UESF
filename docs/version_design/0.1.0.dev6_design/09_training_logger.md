@@ -253,12 +253,7 @@ class RegularExecutionStrategy:
 
 ## 9.8 配置校验规则
 
-新增以下校验规则，补充至 [配置校验规则文档](07_config_validation_rules.md)：
-
-| 编号 | 规则 | 异常类型 |
-|:-----|:-----|:---------|
-| R13 | `training.logging.backend` 仅允许 `"tensorboard"`（后续版本可扩展） | `TypeMismatchError` |
-| R14 | `training.logging.log_every_n_epochs` 必须为正整数 | `TypeMismatchError` |
+相关配置校验规则见 [07_config_validation_rules.md](07_config_validation_rules.md) 中 R17、R18。
 
 ## 9.9 依赖管理
 
