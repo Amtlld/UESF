@@ -11,10 +11,11 @@ load dataset → （无需 alignment）
     → create_splitter(split_config) → HoldoutSplitter | KFoldSplitter
     → splitter.split(data_5d) → folds: list[SplitResult]
     → for each fold:
+        → apply_transforms_per_dataset / apply_transforms_global
+              (dataset_cache, split_indices)  # 原地修改 dataset_cache
         → for phase in [train, val, test]:
             prepare_channel_data(split_result, dataset_cache, phase)
-                → channel_data, channel_labels
-        → apply_transforms_per_dataset / apply_transforms_global
+                → channel_data, channel_labels  # 使用已 transform 的 dataset_cache
         → for phase in [train, val, test]:
             DataloaderBuilder.build(channel_data, channel_labels, batch_size, shuffle)
                 → DataLoader
@@ -42,10 +43,11 @@ load datasets → alignment
               "train": {alias: train_idx, ...},
               "val":   {alias: val_idx, ...},
               "test":  {alias: all_idx, ...}})
+        → apply_transforms_per_dataset / apply_transforms_global
+              (dataset_cache, split_indices)  # 原地修改 dataset_cache
         → for phase in [train, val, test]:
             prepare_channel_data(multi_result, dataset_cache, phase)
-                → channel_data, channel_labels  # 内部按 alias 切片后 concat
-        → apply_transforms_per_dataset / apply_transforms_global
+                → channel_data, channel_labels  # 使用已 transform 的 dataset_cache
         → for phase in [train, val, test]:
             DataloaderBuilder.build(channel_data, channel_labels, batch_size, shuffle)
                 → DataLoader
@@ -90,11 +92,12 @@ load datasets → alignment (if cross-dataset)
     → create_uda_orchestrator(uda_config)
     → orchestrator.split(dataset_cache) → uda_folds: list[UDASplitResult]
     → for each uda_fold:
+        → apply_transforms_uda(transforms_config, dataset_cache, uda_split, adaptation)
+              # 原地修改 dataset_cache
         → prepare_uda_channel_data(uda_split, dataset_cache)
             → {"train": (channel_data, channel_labels),
                "val":   (channel_data, channel_labels),
                "test":  (channel_data, channel_labels)}
-        → apply_transforms_uda(transforms_config, dataset_cache, uda_split, adaptation)
         → for phase in [train, val, test]:
             DataloaderBuilder.build(channel_data, channel_labels, batch_size, shuffle)
                 → DataLoader

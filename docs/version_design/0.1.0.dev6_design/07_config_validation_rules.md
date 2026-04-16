@@ -10,7 +10,7 @@
 | R6 | holdout ratio 求和 | 无 `val_split` 时：`train_ratio + val_ratio + test_ratio` 之和满足 `abs(sum - 1.0) < 1e-4`；有 `val_split` 时：`train_ratio + test_ratio` 之和满足 `abs(sum - 1.0) < 1e-4` |
 | R7 | k-fold 合法 k 值 | k-fold 的 `k > 1` 或 `k == -1` |
 | R8 | 跨数据集域需指定 | `domain.dimension=dataset` + `strategy=holdout` → 必须指定 `source` 和 `target` |
-| R9 | 数据集内域需单数据集 | `domain.dimension=subject\|session` → `len(datasets) == 1`（不同数据集的 subject/session 编号可能冲突，无法统一分组） |
+| R9 | 数据集内域需单数据集 | `domain.dimension=subject\|session` → `len(datasets) == 1`（不同数据集的 subject/session 编号可能冲突，无法统一分组）。注：此规则为 R25 UDA 部分的逆否等价形式，保留以提供更直接的错误提示 |
 | R10 | 源域无测试集 | `source.split`（若存在）不含 `strategy`、`test_ratio`、`train_ratio`。`source` 块整体可选，省略时源域全量数据作为训练集，`source_val` 为空 |
 | R11 | 域维度与内部维度不同 | `domain.dimension` ≠ `source.split.dimension`（若 `source.split` 存在）且 `domain.dimension` ≠ `target.split.dimension`（若 `target.split` 存在） |
 | R12 | target 计数互斥 | `domain` 中 `target_count` 和 `target_ratio` 不可同时出现 |

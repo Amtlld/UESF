@@ -172,7 +172,7 @@ class RegularExecutionStrategy:
     """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
-        """根据 dimension 选择路径 → 遍历 fold → apply transforms → 训练评估 → 返回各 fold 结果。"""
+        """根据 dimension 选择路径 → 遍历 fold → apply transforms → prepare data → 训练评估 → 返回各 fold 结果。"""
         ...
 
 class UDAExecutionStrategy:
@@ -196,7 +196,7 @@ class UDAExecutionStrategy:
     """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
-        """创建 UDAOrchestrator → 遍历展平后的 fold → apply transforms → 训练评估 → 返回各 fold 结果。"""
+        """创建 UDAOrchestrator → 遍历展平后的 fold → apply transforms → prepare data → 训练评估 → 返回各 fold 结果。"""
         ...
 ```
 
@@ -302,12 +302,12 @@ class MultiDatasetSplitResult:
 class DomainSplitResult:
     """UDA 域划分结果 — 一个 domain fold。
     
-    所有索引均为 flatten_3d 后的样本级索引空间：
+    所有索引均为 flatten_3d 后的样本级索引空间。
+    alias 信息通过 dict keys 获取（source_indices.keys() / target_indices.keys()）。
     
     对于跨数据集 UDA (dimension=dataset):
-        source_aliases/target_aliases 记录 alias 列表；
-        source_indices/target_indices 中各 alias 的值为 range(0, N_i)
-        即该数据集 flatten_3d 后的全量索引。
+        source_indices/target_indices 各含对应域的 alias 键，
+        每个 alias 的值为 range(0, N_i) 即该数据集 flatten_3d 后的全量索引。
     对于数据集内 UDA (dimension=subject/session):
         dict 中仅有单个 alias，索引为该维度分组后的样本级索引。
     """
@@ -556,7 +556,7 @@ class UDAOrchestrator:
 ```python
 # ---- experiment/splitter/__init__.py ----
 
-def create_splitter(config: dict) -> HoldoutSplitter | KFoldSplitter:
+def create_splitter(config: dict, seed: int = 42) -> HoldoutSplitter | KFoldSplitter:
     """根据配置创建索引级 regular splitter（dimension ≠ dataset）。
     
     自动根据 strategy 选择:
@@ -564,14 +564,15 @@ def create_splitter(config: dict) -> HoldoutSplitter | KFoldSplitter:
     - strategy=k-fold → KFoldSplitter（传入 val_split_config 若存在）
     
     若配置中包含 val_split 子块，提取为 val_split_config 传入 splitter。
+    seed 透传给 splitter 构造函数。
     
     注意：dimension=dataset 时不经过此工厂，由 RegularExecutionStrategy
     直接构造 DatasetLevelSplitter 并走独立的跨数据集执行路径。
     """
     ...
 
-def create_uda_orchestrator(uda_config: dict) -> UDAOrchestrator:
-    """根据 UDA 配置创建编排器。"""
+def create_uda_orchestrator(uda_config: dict, seed: int = 42) -> UDAOrchestrator:
+    """根据 UDA 配置创建编排器。seed 透传给 UDAOrchestrator。"""
     ...
 ```
 
@@ -698,15 +699,18 @@ def apply_transforms_per_dataset(
     
     Args:
         transforms_config: 变换配置列表，如 [{"name": "zscore_normalize"}]
-        dataset_cache: alias → flatten_3d 后的数据（原地修改）
+        dataset_cache: alias → 5D 数据（原地修改，保持 5D 形状）
         split_indices: alias → {phase → indices}
+            indices 为 flatten_3d 后的样本级索引。
             e.g. {"ds_a": {"train": array([...]), "val": array([...]), "test": array([...])}}
         fit_phase: fit 时使用的 phase 名（默认 "train"）
     
     流程：
     1. 对每个 alias 独立创建 transform 实例
-    2. transform.fit(dataset_cache[alias][split_indices[alias][fit_phase]])
-    3. 对该 alias 的所有 phase 数据执行 transform.transform()
+    2. flatten_3d(dataset_cache[alias]) → 3D 数据
+    3. 用 split_indices[alias][fit_phase] 索引取出训练数据 → transform.fit()
+    4. 对 flatten_3d 后的全量数据执行 transform.transform()
+    5. reshape 回 5D 写回 dataset_cache[alias]
     
     特殊情况（dimension=dataset 的测试数据集）：
     - 若 split_indices[alias] 中无 fit_phase 键（测试数据集无训练部分），
@@ -726,14 +730,15 @@ def apply_transforms_global(
     
     Args:
         transforms_config: 变换配置列表
-        dataset_cache: alias → flatten_3d 后的数据（原地修改）
-        split_indices: alias → {phase → indices}
+        dataset_cache: alias → 5D 数据（原地修改，保持 5D 形状）
+        split_indices: alias → {phase → indices}（indices 为 flatten_3d 后的样本级索引）
         fit_phase: fit 时使用的 phase 名（默认 "train"）
     
     流程：
     1. 创建单个 transform 实例
-    2. 合并所有 alias 的 fit_phase 数据 → transform.fit(merged_train)
-    3. 对所有 alias 的所有 phase 数据执行 transform.transform()
+    2. 对每个 alias: flatten_3d → 用 fit_phase 索引取出训练数据
+    3. 合并所有 alias 的训练数据 → transform.fit(merged_train)
+    4. 对每个 alias: flatten_3d → transform.transform() → reshape 回 5D 写回
     """
     ...
 
@@ -749,7 +754,7 @@ def apply_transforms_uda(
     
     Args:
         transforms_config: 变换配置列表
-        dataset_cache: alias → flatten_3d 后的数据（原地修改）
+        dataset_cache: alias → 5D 数据（原地修改，保持 5D 形状）
         uda_split: 当前 fold 的 UDA 划分结果
         adaptation: "transductive" | "inductive"
     

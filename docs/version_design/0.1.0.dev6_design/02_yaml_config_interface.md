@@ -11,6 +11,7 @@
 ```yaml
 strategy: holdout | k-fold        # 划分策略
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
+         # Regular 模式顶层 split 额外支持 dataset（见 2.2）
 shuffle: true                      # 是否打乱划分维度上的分组顺序（默认 true）
                                    # false: 按维度原始顺序依次分配 train → val → test
                                    # true: 先随机打乱分组顺序，再按比例分配
@@ -79,7 +80,7 @@ shuffle: true                      # 是否打乱分组顺序（默认 true）
 # k-fold: k（-1 = leave-one-out）
 ```
 
-> **设计说明**：`dataset` 维度仅出现在 DomainPartition 中，不出现在 Split Block / ValSplit Block 中。跨数据集的 Regular 模式操作由 `split.dimension: dataset` 专门处理。
+> **设计说明**：`dataset` 维度在 UDA 模式中仅出现在 DomainPartition 中，不出现在 UDA 的 `source.split`（ValSplit）和 `target.split`（Split Block）中。在 Regular 模式中，顶层 `split` 额外支持 `dimension: dataset`（见 2.2），此时由 `DatasetLevelSplitter` 处理，走独立的跨数据集执行路径。
 >
 > **不支持 `recording` 维度**：DomainPartition 当前不支持 `dimension: recording`。Recording 通常是同一 subject 同一 session 内的重复采集，跨 recording 的域偏移较小，UDA 意义有限。如有需求，后续版本可扩展。
 
@@ -179,7 +180,7 @@ training: { epochs: 100, batch_size: 64 }
 evaluation: { metrics: [accuracy] }
 ```
 
-> **验证集处理**：`dimension=dataset` 时必须使用 `val_split` 子块（不支持主划分的 `val_ratio` 和 `assign.val`）。验证集从 `assign.train` 指定的训练数据集合并后，按 `val_split.dimension` 分组、按 `val_split.val_ratio` 切出。省略 `val_split` 则无验证集。
+> **验证集处理**：`dimension=dataset` 时，若需要验证集则必须通过 `val_split` 子块配置（不支持主划分的 `val_ratio` 和 `assign.val`）。框架对 `assign.train` 指定的每个训练数据集独立调用 `ValSplitter`——各数据集保持 5D 结构，在自身维度空间内按 `val_split.dimension` 分组、按 `val_split.val_ratio` 切出验证集，避免不同数据集的 subject/session/recording 命名空间混淆。省略 `val_split` 则无验证集。
 
 **场景 D：跨数据集 K-Fold（各数据集轮流做测试集）**
 
@@ -194,7 +195,7 @@ split:
     shuffle: true
 ```
 
-> **验证集处理**：`dimension=dataset` + `k-fold` 时，每折的测试集为一个数据集，其余数据集作为训练集。验证集通过 `val_split` 配置在训练集内部按指定维度切出。省略 `val_split` 则该折无验证集。
+> **验证集处理**：`dimension=dataset` + `k-fold` 时，每折的测试集为一个数据集，其余数据集作为训练集。验证集通过 `val_split` 配置，对每个训练数据集独立按 `val_split.dimension` 分组切出。省略 `val_split` 则该折无验证集。
 
 > **Regular 模式小结**：`split` 统一位于顶层，使用 Split Block 结构。`dimension` 可为 `subject | session | recording | flatten | dataset` 五选一。当 `dimension: dataset` 时需声明多个 datasets 并配置 alignment。
 
