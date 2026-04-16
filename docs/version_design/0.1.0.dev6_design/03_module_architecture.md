@@ -8,13 +8,13 @@ src/uesf/experiment/
 ├── config_schema.py          # YAML 配置校验与规范化
 ├── splitter/                 # 拆为子包
 │   ├── __init__.py           # 导出 create_splitter, SplitResult, UDASplitResult 等
-│   ├── base.py               # SplitResult, DomainSplitResult, UDASplitResult
+│   ├── base.py               # SplitResult, MultiDatasetSplitResult, DomainSplitResult, UDASplitResult
 │   ├── regular.py            # HoldoutSplitter, KFoldSplitter, DatasetLevelSplitter
 │   ├── uda.py                # DatasetDomainSplitter, DimensionDomainSplitter,
 │   │                         # ValSplitter, UDAOrchestrator
 │   └── grouping.py           # get_groups() 维度分组工具函数
 ├── alignment.py              # ChannelAligner, LabelAligner（保持现有接口）
-├── transforms.py             # ZScoreNormalize 等（保持现有）
+├── transforms.py             # ZScoreNormalize 等（保持现有）+ apply_transforms 应用函数
 ├── dataset.py                # EEGDataset（保持现有）
 ├── dataloader_builder.py     # 重构：自动通道映射
 ├── logger.py                 # 新增：TrainingLogger 协议 + TensorBoardLogger 实现
@@ -140,30 +140,46 @@ class ExperimentExecutor:
 class RegularExecutionStrategy:
     """Regular 模式执行策略。
     
+    根据 split.dimension 走两条路径：
+    
+    路径 A — dimension ≠ dataset（单数据集）：
+      1. create_splitter(split_config) → HoldoutSplitter | KFoldSplitter
+      2. splitter.split(data_5d) → list[SplitResult]
+      3. prepare_channel_data(split_result, dataset_cache, phase) 构建通道数据
+    
+    路径 B — dimension = dataset（跨数据集）：
+      1. 直接构造 DatasetLevelSplitter（不经过 create_splitter 工厂）
+      2. splitter.split(aliases) → list[DatasetLevelSplitResult]
+      3. 对每折的训练数据集独立调用 ValSplitter（若配置了 val_split）
+      4. 组装为 MultiDatasetSplitResult
+      5. prepare_channel_data(multi_result, dataset_cache, phase) 构建通道数据
+    
     transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行，
-    行为由 transform 的 scope 参数决定：
+    通过 apply_transforms_per_dataset / apply_transforms_global 函数完成：
     
     scope=per_dataset（默认）：
-      1. 对每个数据集独立创建 transform 实例
-      2. transform.fit(该数据集的 train 部分)
-      3. transform.transform(该数据集的 train/val/test 部分)
+      调用 apply_transforms_per_dataset()
+      - 对每个数据集独立创建 transform 实例
+      - transform.fit(该数据集的 train 部分)
+      - transform.transform(该数据集的 train/val/test 部分)
       单数据集时等价于 scope=global。
     
     scope=global：
-      1. 创建单个 transform 实例
-      2. transform.fit(所有数据集的 train 合并数据)
-      3. transform.transform(所有 train/val/test 数据)
+      调用 apply_transforms_global()
+      - 创建单个 transform 实例
+      - transform.fit(所有数据集的 train 合并数据)
+      - transform.transform(所有 train/val/test 数据)
     """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
-        """创建 splitter → 遍历 fold → 训练评估 → 返回各 fold 结果。"""
+        """根据 dimension 选择路径 → 遍历 fold → apply transforms → 训练评估 → 返回各 fold 结果。"""
         ...
 
 class UDAExecutionStrategy:
     """UDA 模式执行策略。
     
     transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行。
-    UDA 模式始终使用 per_dataset 语义（跨数据集时各数据集独立标准化）：
+    UDA 模式始终使用 per_dataset 语义，通过 apply_transforms_uda() 函数完成：
     
     1. 对每个数据集独立创建 transform 实例
     2. transform.fit(该数据集内的训练部分)
@@ -180,7 +196,7 @@ class UDAExecutionStrategy:
     """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
-        """创建 UDAOrchestrator → 遍历展平后的 fold → 训练评估 → 返回各 fold 结果。"""
+        """创建 UDAOrchestrator → 遍历展平后的 fold → apply transforms → 训练评估 → 返回各 fold 结果。"""
         ...
 ```
 
@@ -258,21 +274,46 @@ class SplitResult:
 
 @dataclass
 class DatasetLevelSplitResult:
-    """数据集级划分结果。"""
+    """数据集级划分结果（alias 级别，不含 sample 索引）。"""
     phase_aliases: dict[str, list[str]]  # {"train": ["ds_a"], "test": ["ds_b"]}
+
+@dataclass
+class MultiDatasetSplitResult:
+    """跨数据集划分的最终结果（dimension=dataset 时使用）。
+    
+    由 RegularExecutionStrategy 组装：先从 DatasetLevelSplitResult 获取 alias 级
+    train/test 划分，再对每个训练数据集独立调用 ValSplitter 切出 val 索引，
+    最终汇总为 phase → {alias → indices} 结构。
+    
+    与 SplitResult（单数据集索引级）和 DatasetLevelSplitResult（alias 级无索引）
+    相比，此结构同时携带多数据集信息和 sample 级索引，打通了跨数据集 val_split
+    到 prepare_channel_data 的数据流。
+    """
+    phase_indices: dict[str, dict[str, np.ndarray]]
+    # phase → {alias → flatten_3d 后的 sample indices}
+    # e.g. {"train": {"ds_a": array([0,1,3,5]), "ds_b": array([0,2,4])},
+    #        "val":   {"ds_a": array([2,4]),     "ds_b": array([1,3])},
+    #        "test":  {"ds_c": array([0,1,2,3,4,5])}}
+    #
+    # 测试数据集的索引为该数据集 flatten_3d 后的全量索引。
+    # 无验证集时 "val" 键对应空 dict 或各 alias 对应空数组。
 
 @dataclass
 class DomainSplitResult:
     """UDA 域划分结果 — 一个 domain fold。
     
+    所有索引均为 flatten_3d 后的样本级索引空间：
+    
     对于跨数据集 UDA (dimension=dataset):
-        source_indices/target_indices: {alias: 全量索引}
+        source_aliases/target_aliases 记录 alias 列表；
+        source_indices/target_indices 中各 alias 的值为 range(0, N_i)
+        即该数据集 flatten_3d 后的全量索引。
     对于数据集内 UDA (dimension=subject/session):
-        source_indices/target_indices: {alias: 对应维度的索引}
+        dict 中仅有单个 alias，索引为该维度分组后的样本级索引。
     """
-    source_indices: dict[str, np.ndarray]  # alias → sample indices
-    target_indices: dict[str, np.ndarray]  # alias → sample indices
-    fold_info: dict                        # 描述信息（如哪个 subject 作为 target）
+    source_indices: dict[str, np.ndarray]  # alias → flatten_3d 后的 sample indices
+    target_indices: dict[str, np.ndarray]  # alias → flatten_3d 后的 sample indices
+    fold_info: dict                        # 描述信息（如哪个 subject/dataset 作为 target）
 
 @dataclass
 class UDASplitResult:
@@ -515,15 +556,17 @@ class UDAOrchestrator:
 ```python
 # ---- experiment/splitter/__init__.py ----
 
-def create_splitter(config: dict) -> HoldoutSplitter | KFoldSplitter | DatasetLevelSplitter:
-    """根据配置创建 regular splitter。
+def create_splitter(config: dict) -> HoldoutSplitter | KFoldSplitter:
+    """根据配置创建索引级 regular splitter（dimension ≠ dataset）。
     
-    自动根据 strategy 和 dimension 选择:
-    - dimension=dataset → DatasetLevelSplitter
+    自动根据 strategy 选择:
     - strategy=holdout → HoldoutSplitter（传入 val_split_config 若存在）
     - strategy=k-fold → KFoldSplitter（传入 val_split_config 若存在）
     
     若配置中包含 val_split 子块，提取为 val_split_config 传入 splitter。
+    
+    注意：dimension=dataset 时不经过此工厂，由 RegularExecutionStrategy
+    直接构造 DatasetLevelSplitter 并走独立的跨数据集执行路径。
     """
     ...
 
@@ -542,22 +585,24 @@ SplitResult / UDASplitResult 仅携带索引，需要经过"索引 → 切片 �
 # ---- experiment/dataloader_builder.py ----
 
 def prepare_channel_data(
-    split_result: SplitResult | DatasetLevelSplitResult,
+    split_result: SplitResult | MultiDatasetSplitResult,
     dataset_cache: dict[str, np.ndarray],
     phase: str,  # "train" | "val" | "test"
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """将 Regular 模式 SplitResult 的索引转换为通道数据 dict。
+    """将 Regular 模式划分结果的索引转换为通道数据 dict。
 
     单数据集（SplitResult）：
         indices = getattr(split_result, f"{phase}_indices")
         data = flatten_3d(dataset_cache[alias])[indices]
         return {"main": data}, {"main": labels}
 
-    多数据集 dimension=dataset（DatasetLevelSplitResult）：
-        aliases = split_result.phase_aliases[phase]
-        arrays = [flatten_3d(dataset_cache[a]) for a in aliases]
+    多数据集 dimension=dataset（MultiDatasetSplitResult）：
+        alias_indices = split_result.phase_indices[phase]  # {alias → indices}
+        arrays = [flatten_3d(dataset_cache[a])[idx] for a, idx in alias_indices.items()]
         merged = np.concatenate(arrays, axis=0)
         return {"main": merged}, {"main": merged_labels}
+        
+        若 phase 对应空 dict（如无验证集时的 "val"），返回空数组。
 
     Returns:
         (channel_data, channel_labels):
@@ -636,7 +681,91 @@ def _get_sample_input(train_loader, mode: str = "regular") -> torch.Tensor:
     ...
 ```
 
-### 3.4.8 训练日志
+### 3.4.8 Transform 应用
+
+```python
+# ---- experiment/transforms.py ----
+
+def apply_transforms_per_dataset(
+    transforms_config: list[dict],
+    dataset_cache: dict[str, np.ndarray],
+    split_indices: dict[str, dict[str, np.ndarray]],
+    fit_phase: str = "train",
+) -> None:
+    """对每个数据集独立 fit & transform（原地修改 dataset_cache）。
+    
+    用于 Regular 模式 scope=per_dataset 和所有 UDA 场景。
+    
+    Args:
+        transforms_config: 变换配置列表，如 [{"name": "zscore_normalize"}]
+        dataset_cache: alias → flatten_3d 后的数据（原地修改）
+        split_indices: alias → {phase → indices}
+            e.g. {"ds_a": {"train": array([...]), "val": array([...]), "test": array([...])}}
+        fit_phase: fit 时使用的 phase 名（默认 "train"）
+    
+    流程：
+    1. 对每个 alias 独立创建 transform 实例
+    2. transform.fit(dataset_cache[alias][split_indices[alias][fit_phase]])
+    3. 对该 alias 的所有 phase 数据执行 transform.transform()
+    
+    特殊情况（dimension=dataset 的测试数据集）：
+    - 若 split_indices[alias] 中无 fit_phase 键（测试数据集无训练部分），
+      则 fit on 该数据集全量数据。调用者在构造 split_indices 时需处理此逻辑。
+    """
+    ...
+
+def apply_transforms_global(
+    transforms_config: list[dict],
+    dataset_cache: dict[str, np.ndarray],
+    split_indices: dict[str, dict[str, np.ndarray]],
+    fit_phase: str = "train",
+) -> None:
+    """合并所有数据集的训练数据 fit，统一 transform（原地修改 dataset_cache）。
+    
+    仅用于 Regular 模式 scope=global。UDA 模式禁止使用（校验规则 R23）。
+    
+    Args:
+        transforms_config: 变换配置列表
+        dataset_cache: alias → flatten_3d 后的数据（原地修改）
+        split_indices: alias → {phase → indices}
+        fit_phase: fit 时使用的 phase 名（默认 "train"）
+    
+    流程：
+    1. 创建单个 transform 实例
+    2. 合并所有 alias 的 fit_phase 数据 → transform.fit(merged_train)
+    3. 对所有 alias 的所有 phase 数据执行 transform.transform()
+    """
+    ...
+
+def apply_transforms_uda(
+    transforms_config: list[dict],
+    dataset_cache: dict[str, np.ndarray],
+    uda_split: "UDASplitResult",
+    adaptation: str,
+) -> None:
+    """UDA 模式的 transform 应用（原地修改 dataset_cache）。
+    
+    始终使用 per_dataset 语义，但 fit 数据的选择因域角色而异：
+    
+    Args:
+        transforms_config: 变换配置列表
+        dataset_cache: alias → flatten_3d 后的数据（原地修改）
+        uda_split: 当前 fold 的 UDA 划分结果
+        adaptation: "transductive" | "inductive"
+    
+    流程：
+    1. 源域各数据集：fit on source_train[alias]，transform source_train/source_val
+    2. 目标域各数据集：
+       - inductive: fit on target_train[alias]，transform target_train/target_val/target_test
+       - transductive: fit on 目标域全量数据，transform 同一份数据
+    
+    内部委托 apply_transforms_per_dataset()，通过构造不同的 split_indices
+    和 fit_phase 参数来实现源域/目标域的差异化行为。
+    """
+    ...
+```
+
+### 3.4.9 训练日志
 
 ```python
 # ---- experiment/logger.py ----

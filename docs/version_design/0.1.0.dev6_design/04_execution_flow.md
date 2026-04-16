@@ -2,15 +2,50 @@
 
 ## 4.1 Regular 模式流程
 
+根据 `split.dimension` 是否为 `dataset`，Regular 模式走两条路径：
+
+**路径 A — 单数据集（dimension ≠ dataset）**：
+
 ```
-load datasets → alignment (if multi-dataset)
-    → create_splitter(split_config)
-    → splitter.split(data) → folds: list[SplitResult]
+load dataset → （无需 alignment）
+    → create_splitter(split_config) → HoldoutSplitter | KFoldSplitter
+    → splitter.split(data_5d) → folds: list[SplitResult]
     → for each fold:
         → for phase in [train, val, test]:
             prepare_channel_data(split_result, dataset_cache, phase)
                 → channel_data, channel_labels
-        → apply transforms (scope-dependent, see below)
+        → apply_transforms_per_dataset / apply_transforms_global
+        → for phase in [train, val, test]:
+            DataloaderBuilder.build(channel_data, channel_labels, batch_size, shuffle)
+                → DataLoader
+        → init fresh model + trainer
+        → create_logger(logging_config, fold_dir/tb_logs)  # 可选
+        → runner.run(logger=logger) → fold_result
+    → aggregate fold results → final_results
+```
+
+**路径 B — 跨数据集（dimension = dataset）**：
+
+```
+load datasets → alignment
+    → DatasetLevelSplitter(strategy, assign, k, seed)   # 直接构造，不经 create_splitter 工厂
+    → splitter.split(aliases) → folds: list[DatasetLevelSplitResult]
+    → for each fold:
+        → # 组装 MultiDatasetSplitResult
+        → 训练 aliases = fold.phase_aliases["train"]
+        → 测试 aliases = fold.phase_aliases["test"]
+        → for alias in 训练 aliases:
+            ValSplitter.split(dataset_cache[alias])  # 若配置了 val_split
+                → per-alias train_indices / val_indices
+        → 测试 aliases: 全量索引
+        → 组装 MultiDatasetSplitResult(phase_indices={
+              "train": {alias: train_idx, ...},
+              "val":   {alias: val_idx, ...},
+              "test":  {alias: all_idx, ...}})
+        → for phase in [train, val, test]:
+            prepare_channel_data(multi_result, dataset_cache, phase)
+                → channel_data, channel_labels  # 内部按 alias 切片后 concat
+        → apply_transforms_per_dataset / apply_transforms_global
         → for phase in [train, val, test]:
             DataloaderBuilder.build(channel_data, channel_labels, batch_size, shuffle)
                 → DataLoader
@@ -22,13 +57,16 @@ load datasets → alignment (if multi-dataset)
 
 > **val_ratio 换算**：无 `val_split` 时，`ConfigValidator.normalize()` 在 K-Fold 场景中自动将用户配置的 `val_ratio`（整体比例）换算为 `val_ratio_in_train = val_ratio / (1 - 1/k)`，传给 `KFoldSplitter`。用户无感知。
 
-> **val_split 独立划分**：若配置了 `val_split`，splitter 的主划分仅产生 train/test。splitter 内部使用 `ValSplitter`（基于 `val_split.dimension`）从每折的 train 中切出 val，最终 `SplitResult` 仍包含 train/val/test 三组索引。对于 `dimension=dataset` 场景，`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`——各数据集保持 5D 结构，在自身维度空间内按 `val_split.dimension` 分组切出验证集，避免不同数据集的 subject/session/recording 命名空间混淆。
+> **val_split 独立划分**：
+> - **路径 A**（dimension ≠ dataset）：若配置了 `val_split`，splitter 的主划分仅产生 train/test。splitter 内部使用 `ValSplitter`（基于 `val_split.dimension`）从每折的 train 中切出 val，最终 `SplitResult` 仍包含 train/val/test 三组索引。
+> - **路径 B**（dimension = dataset）：`DatasetLevelSplitResult` 仅包含 alias 级 train/test 划分。`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`——各数据集保持 5D 结构，在自身维度空间内按 `val_split.dimension` 分组切出验证集，避免不同数据集的 subject/session/recording 命名空间混淆。最终汇总为 `MultiDatasetSplitResult`，统一传入 `prepare_channel_data`。
 
 > **Transform fit 策略（Regular 模式）**：
-> - `scope: per_dataset`（默认）：各数据集独立标准化。fit 仅在该数据集内可用的训练数据上进行：
->   - **数据集内切分**（`dimension=subject/session/recording/flatten`）：fit on 该数据集的 train 部分，transform on 该数据集的 train/val/test 部分。
->   - **跨数据集**（`dimension=dataset`）：训练数据集 fit on 去掉 val 后的训练部分（有 `val_split` 时）或全量（无 `val_split` 时），transform on 该数据集的 train/val 部分；测试数据集 fit on 自身全量数据（无训练部分可用），transform on 自身全量数据。各数据集使用各自的统计量，互不影响。
-> - `scope: global`：所有数据集的训练数据合并后 fit，统一 transform 到所有 train/val/test 数据。仅 Regular 模式可用。
+> 通过 `apply_transforms_per_dataset()` 或 `apply_transforms_global()` 函数执行：
+> - `scope: per_dataset`（默认）：调用 `apply_transforms_per_dataset()`。各数据集独立标准化，fit 仅在该数据集内可用的训练数据上进行：
+>   - **数据集内切分**（路径 A）：fit on 该数据集的 train 部分，transform on 该数据集的 train/val/test 部分。
+>   - **跨数据集**（路径 B）：训练数据集 fit on 去掉 val 后的训练部分（有 `val_split` 时）或全量（无 `val_split` 时），transform on 该数据集的 train/val 部分；测试数据集 fit on 自身全量数据（无训练部分可用），transform on 自身全量数据。各数据集使用各自的统计量，互不影响。
+> - `scope: global`：调用 `apply_transforms_global()`。所有数据集的训练数据合并后 fit，统一 transform 到所有 train/val/test 数据。仅 Regular 模式可用。
 > - 无论何种 scope，验证集和测试集均不参与 fit（跨数据集场景下测试数据集 fit on 自身全量属于特殊情况：该数据集整体为 test，无训练部分可用），以避免数据泄漏。
 
 **自动通道映射规则（Regular 模式）**：
@@ -38,7 +76,7 @@ load datasets → alignment (if multi-dataset)
 > **多数据集合并策略（`dimension=dataset`）**：
 > - 各数据集将前三维展平：`[n_subjects, n_sessions, n_recordings, n_channels, n_samples]` → `[N_i, n_channels, n_samples]`
 > - 属于同一 phase 的数据集沿 axis=0 concat：`[sum(N_i), n_channels, n_samples]` → 构建 `"main"` 通道 dataloader
-> - `DatasetLevelSplitter` 返回的是 alias 级别的划分（哪些数据集做 train / test），不涉及 sample 级索引
+> - `DatasetLevelSplitter` 返回的是 alias 级别的划分（哪些数据集做 train / test），不涉及 sample 级索引。`RegularExecutionStrategy` 在此基础上组装 `MultiDatasetSplitResult`（携带 per-alias sample 索引），统一传入 `prepare_channel_data`
 > - `get_groups()` 不适用于 `dimension=dataset`，仅在数据集内部按 subject / session / recording / flatten 分组时使用
 > - 合并前提：
 >   - `n_channels`：由 `alignment.channel: intersection` 保证一致
@@ -56,7 +94,7 @@ load datasets → alignment (if cross-dataset)
             → {"train": (channel_data, channel_labels),
                "val":   (channel_data, channel_labels),
                "test":  (channel_data, channel_labels)}
-        → apply transforms per dataset (see below)
+        → apply_transforms_uda(transforms_config, dataset_cache, uda_split, adaptation)
         → for phase in [train, val, test]:
             DataloaderBuilder.build(channel_data, channel_labels, batch_size, shuffle)
                 → DataLoader
@@ -79,7 +117,7 @@ load datasets → alignment (if cross-dataset)
 > Trainer 的 `training_step(batch)` 签名不变。UDA Trainer 自行从 `batch["source"]` 和 `batch["target"]` 中取数据，实现域适应逻辑。
 
 > **Transform fit 策略（UDA 模式）**：
-> UDA 模式始终使用 per_dataset 语义——各数据集内独立 fit & transform：
+> 通过 `apply_transforms_uda()` 函数执行。UDA 模式始终使用 per_dataset 语义——各数据集内独立 fit & transform（`apply_transforms_uda` 内部委托 `apply_transforms_per_dataset`，通过构造不同的 `split_indices` 和 `fit_phase` 参数实现源域/目标域差异化行为）：
 > - **源域各数据集**：fit on 该数据集的 source_train 部分，transform 该数据集的 source_train / source_val
 > - **目标域各数据集（inductive）**：fit on 该数据集的 target_train 部分，transform 该数据集的 target_train / target_val / target_test
 > - **目标域各数据集（transductive）**：fit on 该数据集的目标域全量数据，transform 同一份数据。当前版本不支持 transductive 下的 checkpoint/早停
@@ -115,7 +153,7 @@ for alias in source_aliases:
 
 > **数据集内 UDA**（`domain.dimension=subject/session`）：dict 中只有单个 alias，ValSplitter 直接在该 alias 的 5D 数据上操作，行为一致。
 >
-> **Regular 模式 `dimension=dataset` 的 val_split 同理**：`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`，各数据集在自身维度空间内分组切出验证集。
+> **Regular 模式 `dimension=dataset` 的 val_split 同理**：`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`，各数据集在自身维度空间内分组切出验证集，最终汇总为 `MultiDatasetSplitResult`（`phase_indices: dict[str, dict[str, np.ndarray]]`），统一传入 `prepare_channel_data`。
 >
 > **下游合并**：`prepare_uda_channel_data` / `prepare_channel_data` 在索引切片后，将属于同一 phase 的数据集沿 axis=0 concat 构建 dataloader。这是索引切片之后的合并，与 ValSplit 分组无关。
 

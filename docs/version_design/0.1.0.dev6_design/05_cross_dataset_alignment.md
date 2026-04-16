@@ -10,11 +10,13 @@ alignment:
 
 **触发条件**：框架检测到 `datasets` 中包含多个数据集 **且** 存在跨数据集操作时，自动应用对齐。
 
-| 场景 | 触发 |
-|:-----|:-----|
-| `mode: regular` + `dimension: dataset` | 自动触发 |
-| `mode: uda` + `domain.dimension: dataset` | 自动触发 |
-| 单数据集内实验 | 跳过 |
+| 场景 | 触发 | 说明 |
+|:-----|:-----|:-----|
+| `mode: regular` + `dimension: dataset` | 自动触发 | 多数据集合并训练，需对齐通道和标签 |
+| `mode: uda` + `domain.dimension: dataset` | 自动触发 | 跨数据集域适应，需对齐通道和标签 |
+| 单数据集内实验（`len(datasets) == 1`） | 跳过 | 无需对齐 |
+| 多数据集 + `dimension ≠ dataset`（Regular）| 被 R25 拦截 | 配置校验阶段即报错，不会到达对齐阶段 |
+| 多数据集 + `domain.dimension ≠ dataset`（UDA）| 被 R25 拦截 | 配置校验阶段即报错，不会到达对齐阶段 |
 
 **对齐时机**：在数据集加载完成后、任何划分操作之前执行。对齐结果直接更新 `dataset_cache`（原地替换），后续划分和训练使用对齐后的数据。
 

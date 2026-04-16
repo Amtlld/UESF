@@ -26,6 +26,7 @@
 | R22 | transform scope 合法值 | `transforms[].scope` 仅允许 `"per_dataset"` 或 `"global"`，其他值抛出 `TypeMismatchError` |
 | R23 | UDA 禁止 global scope | `mode=uda` 时，`transforms[].scope` 不可为 `"global"`（UDA 跨数据集场景下各数据集必须独立标准化） |
 | R24 | transductive 禁止 checkpoint/早停 | `adaptation=transductive` 时，`training.early_stopping` 和 `training.checkpoint` 不可出现（当前版本不支持 transductive 下的 checkpoint/早停逻辑） |
+| R25 | 多数据集需 dataset 维度 | `mode=regular` 且 `len(datasets) > 1` → `split.dimension` 必须为 `dataset`。多数据集场景下各数据集的 subject/session/recording 结构可能不同，无法在非 dataset 维度上统一分组。同理 `mode=uda` 且 `len(datasets) > 1` → `domain.dimension` 必须为 `dataset` |
 
 ---
 
