@@ -6,8 +6,8 @@
 | R2 | mode/uda 互斥 | `mode=uda` ↔ 有 `uda`，无 `split` |
 | R3 | 数据集级需多数据集 | `split.dimension=dataset` → `len(datasets) > 1` |
 | R4 | inductive 需测试集 | `adaptation=inductive` → `target.split` 中有 `test_ratio`（holdout）或 `k`（k-fold） |
-| R5 | transductive 无测试集 | `adaptation=transductive` → `target.split` 无 `test_ratio`，无 `strategy` |
-| R6 | holdout ratio 求和 | holdout 的 `train_ratio + val_ratio + test_ratio` 之和满足 `abs(sum - 1.0) < 1e-4` |
+| R5 | transductive 无 target.split | `adaptation=transductive` → `target.split` 不可出现 |
+| R6 | holdout ratio 求和 | 无 `val_split` 时：`train_ratio + val_ratio + test_ratio` 之和满足 `abs(sum - 1.0) < 1e-4`；有 `val_split` 时：`train_ratio + test_ratio` 之和满足 `abs(sum - 1.0) < 1e-4` |
 | R7 | k-fold 合法 k 值 | k-fold 的 `k > 1` 或 `k == -1` |
 | R8 | 跨数据集域需指定 | `domain.dimension=dataset` + `strategy=holdout` → 必须指定 `source` 和 `target` |
 | R9 | 数据集内域需单数据集 | `domain.dimension=subject\|session` → `len(datasets) == 1`（不同数据集的 subject/session 编号可能冲突，无法统一分组） |
@@ -20,6 +20,12 @@
 | R16 | 单数据集 alignment 处理 | `len(datasets) == 1` 时若存在 `alignment` 块，忽略并发出 warning |
 | R17 | logging.backend 合法值 | `training.logging.backend` 仅允许 `"tensorboard"`，其他值抛出 `TypeMismatchError` |
 | R18 | log_every_n_epochs 正整数 | `training.logging.log_every_n_epochs` 必须为正整数（> 0），否则抛出 `TypeMismatchError` |
+| R19 | val_split 与 val_ratio 互斥 | `split.val_split` 存在时，`split.val_ratio` 不可出现；反之亦然 |
+| R20 | dataset 维度必须用 val_split | `split.dimension=dataset` 时，若需要验证集则必须使用 `val_split`，不可使用主划分的 `val_ratio` |
+| R21 | val_split.val_ratio 值域 | `0 < val_split.val_ratio < 1`（val_split 存在时 val_ratio 必须 > 0，否则不应配置 val_split） |
+| R22 | transform scope 合法值 | `transforms[].scope` 仅允许 `"per_dataset"` 或 `"global"`，其他值抛出 `TypeMismatchError` |
+| R23 | UDA 禁止 global scope | `mode=uda` 时，`transforms[].scope` 不可为 `"global"`（UDA 跨数据集场景下各数据集必须独立标准化） |
+| R24 | transductive 禁止 checkpoint/早停 | `adaptation=transductive` 时，`training.early_stopping` 和 `training.checkpoint` 不可出现（当前版本不支持 transductive 下的 checkpoint/早停逻辑） |
 
 ---
 

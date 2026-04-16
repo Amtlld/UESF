@@ -140,10 +140,19 @@ class ExperimentExecutor:
 class RegularExecutionStrategy:
     """Regular 模式执行策略。
     
-    transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行：
-    1. create_transform(name) 创建 transform 实例
-    2. transform.fit(train_data) — 仅在 train 数据上 fit
-    3. transform.transform(all_data) — 对 train/val/test 统一 transform
+    transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行，
+    行为由 transform 的 scope 参数决定：
+    
+    scope=per_dataset（默认）：
+      1. 对每个数据集独立创建 transform 实例
+      2. transform.fit(该数据集的 train 部分)
+      3. transform.transform(该数据集的 train/val/test 部分)
+      单数据集时等价于 scope=global。
+    
+    scope=global：
+      1. 创建单个 transform 实例
+      2. transform.fit(所有数据集的 train 合并数据)
+      3. transform.transform(所有 train/val/test 数据)
     """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
@@ -153,11 +162,21 @@ class RegularExecutionStrategy:
 class UDAExecutionStrategy:
     """UDA 模式执行策略。
     
-    transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行：
-    1. create_transform(name) 创建 transform 实例
-    2. transform.fit(source_train_data) — 仅在 source_train 数据上 fit
-    3. transform.transform(all_data) — 对所有通道（source_train/source_val/
-       target_train/target_val/target_test）统一 transform
+    transforms 的 fit/transform 在每个 fold 的数据切分后、dataloader 构建前执行。
+    UDA 模式始终使用 per_dataset 语义（跨数据集时各数据集独立标准化）：
+    
+    1. 对每个数据集独立创建 transform 实例
+    2. transform.fit(该数据集内的训练部分)
+       - 源域：fit on source_train
+       - 目标域 inductive：fit on target_train
+       - 目标域 transductive：fit on 目标域全量数据（无 train/test 之分）
+    3. transform.transform(该数据集内的所有部分)
+    
+    单数据集 UDA 时退化为：源域 fit on source_train，目标域 fit on target 对应部分。
+    
+    Checkpoint/早停：
+    - inductive：基于目标域验证集（target_val）上的指标评估
+    - transductive：当前版本不支持 checkpoint/早停
     """
     
     def run(self, ctx: ExperimentContext) -> list[FoldResult]:
@@ -210,9 +229,9 @@ class ConfigValidator:
         - mode 默认 "regular"
         - shuffle 默认 true
         - 旧键名转换（k-folds / k_folds → k）
-        - k-fold val_ratio → val_ratio_in_train 换算
+        - k-fold 无 val_split 时 val_ratio → val_ratio_in_train 换算
+        - val_split 存在时提取为 val_split_config
         - source.split 无 strategy 时标记为 ValSplit 类型
-        - transductive target.split 无 strategy 时标记为 ValSplit 类型
         """
         ...
 
@@ -266,7 +285,7 @@ class UDASplitResult:
     fold_info: dict                       # {"domain_fold": 0, "inner_fold": 2, ...}
 ```
 
-> **transductive 模式 copy 语义**：transductive 模式下 `target_test` 是 `target_train` 的 **copy**（`target_train.copy()`），而非同一引用。这确保下游对其中一个的修改不会影响另一个。
+> **transductive 模式语义**：transductive 模式下 `target_train` 和 `target_test` 均为目标域全量索引的 **copy**，二者内容相同但互不引用。`target_val` 为空数组。`target_train` 用于无监督训练，`target_test` 用于最终测试。当前版本不支持 transductive 下的 checkpoint/早停逻辑。
 
 ### 3.4.3 维度分组工具
 
@@ -278,9 +297,16 @@ def get_groups(data: np.ndarray, dimension: str) -> list[np.ndarray]:
     
     data shape: [n_subjects, n_sessions, n_recordings, n_channels, n_samples]
     
-    dimension="subject"   → 每个 subject 一组（n_subjects 组）
-    dimension="session"   → 每个 (subject, session) 一组（n_subjects × n_sessions 组）
-    dimension="recording" → 每个 (subject, session, recording) 一组
+    仅在指定维度上产生组边界，其余维度内的数据保持完整不被拆分：
+    
+    dimension="subject"   → 按 subject 索引分组（n_subjects 组），
+                            每组包含该 subject 所有 session、recording 的数据
+    dimension="session"   → 按 session 索引分组（n_sessions 组），
+                            每组包含所有 subject 在该 session 下的所有 recording 数据
+    dimension="recording" → 按 recording 索引分组（n_recordings 组），
+                            每组包含所有 subject、所有 session 在该 recording 下的数据
+    dimension="flatten"   → 每个 (subject, session, recording) 三元组为独立一组
+                            （n_subjects × n_sessions × n_recordings 组）
     
     Returns:
         groups: list[np.ndarray], 每个元素是该组在扁平化后的 sample indices
@@ -294,36 +320,62 @@ def get_groups(data: np.ndarray, dimension: str) -> list[np.ndarray]:
 # ---- experiment/splitter/regular.py ----
 
 class HoldoutSplitter:
-    """Holdout 划分：按 ratio 切分为 train/val/test。"""
+    """Holdout 划分：按 ratio 切分为 train/test（或 train/val/test）。
     
-    def __init__(self, dimension: str, train_ratio: float, val_ratio: float,
-                 test_ratio: float, shuffle: bool = False, seed: int = 42):
+    两种模式：
+    - 无 val_split：三路切分，train/val/test 在同一 dimension 上按 ratio 划分
+    - 有 val_split：二路切分，仅产生 train/test，验证集由 ValSplitter 从 train 中切出
+    """
+    
+    def __init__(self, dimension: str, train_ratio: float, test_ratio: float,
+                 val_ratio: float = 0.0, val_split_config: dict | None = None,
+                 shuffle: bool = False, seed: int = 42):
+        """
+        Args:
+            val_ratio: 无 val_split 时，与 train_ratio/test_ratio 同维度切出验证集。
+                       有 val_split 时必须为 0。
+            val_split_config: 验证集独立划分配置（含 dimension, val_ratio, shuffle）。
+                              与主 val_ratio 互斥。
+        """
         ...
     
     def split(self, data: np.ndarray) -> list[SplitResult]:
-        """返回长度为 1 的列表。"""
+        """返回长度为 1 的列表。
+        
+        若指定 val_split_config，内部先二路切分 train/test，
+        再用 ValSplitter 从 train 中切出 val。
+        """
         ...
 
 class KFoldSplitter:
     """K-Fold 划分：K 折交叉验证。"""
     
     def __init__(self, dimension: str, k: int, val_ratio: float = 0.0,
+                 val_split_config: dict | None = None,
                  shuffle: bool = False, seed: int = 42):
         """
         Args:
-            val_ratio: 从整体数据中切出验证集的比例。
+            val_ratio: 无 val_split 时，从整体数据中切出验证集的比例。
                        内部自动换算为 val_ratio_in_train = val_ratio / (1 - 1/k)。
+                       有 val_split 时必须为 0。
+            val_split_config: 验证集独立划分配置（含 dimension, val_ratio, shuffle）。
+                              与主 val_ratio 互斥。
         """
         ...
     
     def split(self, data: np.ndarray) -> list[SplitResult]:
-        """返回长度为 k 的列表。"""
+        """返回长度为 k 的列表。
+        
+        若指定 val_split_config，每折内部先确定 train/test，
+        再用 ValSplitter 从 train 中切出 val。
+        """
         ...
 
 class DatasetLevelSplitter:
-    """数据集级划分：整个数据集分配到 train/val/test。
+    """数据集级划分：整个数据集分配到 train/test。
     
     不继承 BaseSplitter — 接口签名不同（接收 alias 列表而非 np.ndarray）。
+    验证集始终通过 val_split 从训练数据集内部切出（不在 dataset 维度上切分）。
     """
     
     def __init__(self, strategy: str, assign: dict | None = None,
@@ -334,6 +386,10 @@ class DatasetLevelSplitter:
         """
         strategy=holdout + assign: 返回长度为 1 的列表
         strategy=k-fold: 返回长度为 k 的列表（各数据集轮流做测试集）
+        
+        注意：DatasetLevelSplitResult 仅包含 alias 级划分（train/test）。
+        验证集划分由 RegularExecutionStrategy 在合并训练数据后，
+        使用 ValSplitter（基于 val_split 配置）完成。
         """
         ...
 ```
@@ -426,15 +482,12 @@ class UDAOrchestrator:
         
         # 目标域：根据 adaptation 选择（seed + 2）
         self.adaptation = uda_config["adaptation"]
-        target_split_cfg = uda_config.get("target", {}).get("split", {})
         if self.adaptation == "inductive":
+            target_split_cfg = uda_config["target"]["split"]
             # 完整 Split Block → HoldoutSplitter 或 KFoldSplitter
             self.target_splitter = create_splitter(target_split_cfg, seed=base_seed + 2)
-        elif target_split_cfg:
-            # transductive + 有 ValSplit 配置
-            self.target_splitter = ValSplitter(..., seed=base_seed + 2)
         else:
-            self.target_splitter = None  # transductive 无 target.split
+            self.target_splitter = None  # transductive: 目标域不划分
     
     def split(self, dataset_cache: dict) -> list[UDASplitResult]:
         """
@@ -446,9 +499,7 @@ class UDAOrchestrator:
            a. 收集源域数据 → source_splitter.split() → source train/val
            b. 收集目标域数据:
               - inductive: target_splitter.split() → target train/val/test
-              - transductive + ValSplit: target_splitter.split() → target train/val,
-                target_test = target_train.copy()
-              - transductive 无 split: target_train = target_test = 全域数据（copy）
+              - transductive: target_train = target_test = 全域数据（各自 copy），target_val = 空
            c. 组合为 UDASplitResult（含 fold_info）
         3. 处理嵌套折叠（inductive + target k-fold 时展平）
         
@@ -468,8 +519,10 @@ def create_splitter(config: dict) -> HoldoutSplitter | KFoldSplitter | DatasetLe
     
     自动根据 strategy 和 dimension 选择:
     - dimension=dataset → DatasetLevelSplitter
-    - strategy=holdout → HoldoutSplitter
-    - strategy=k-fold → KFoldSplitter
+    - strategy=holdout → HoldoutSplitter（传入 val_split_config 若存在）
+    - strategy=k-fold → KFoldSplitter（传入 val_split_config 若存在）
+    
+    若配置中包含 val_split 子块，提取为 val_split_config 传入 splitter。
     """
     ...
 
@@ -478,7 +531,69 @@ def create_uda_orchestrator(uda_config: dict) -> UDAOrchestrator:
     ...
 ```
 
-### 3.4.7 DataloaderBuilder
+### 3.4.7 通道数据准备与 DataloaderBuilder
+
+#### 通道数据准备函数
+
+SplitResult / UDASplitResult 仅携带索引，需要经过"索引 → 切片 → 按通道组织 dict"的转换才能传入 DataloaderBuilder。以下两个函数承担此职责：
+
+```python
+# ---- experiment/dataloader_builder.py ----
+
+def prepare_channel_data(
+    split_result: SplitResult | DatasetLevelSplitResult,
+    dataset_cache: dict[str, np.ndarray],
+    phase: str,  # "train" | "val" | "test"
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """将 Regular 模式 SplitResult 的索引转换为通道数据 dict。
+
+    单数据集（SplitResult）：
+        indices = getattr(split_result, f"{phase}_indices")
+        data = flatten_3d(dataset_cache[alias])[indices]
+        return {"main": data}, {"main": labels}
+
+    多数据集 dimension=dataset（DatasetLevelSplitResult）：
+        aliases = split_result.phase_aliases[phase]
+        arrays = [flatten_3d(dataset_cache[a]) for a in aliases]
+        merged = np.concatenate(arrays, axis=0)
+        return {"main": merged}, {"main": merged_labels}
+
+    Returns:
+        (channel_data, channel_labels):
+            channel_data:   {"main": np.ndarray}  shape [N, C, T]
+            channel_labels: {"main": np.ndarray}  shape [N]
+    """
+    ...
+
+
+def prepare_uda_channel_data(
+    uda_split: UDASplitResult,
+    dataset_cache: dict[str, np.ndarray],
+) -> dict[str, tuple[dict[str, np.ndarray], dict[str, np.ndarray]]]:
+    """将 UDASplitResult 转换为 UDA 模式各 dataloader 的通道数据。
+
+    流程：
+    1. 遍历 uda_split 的五组索引（source_train/source_val/target_train/target_val/target_test）
+    2. 对每组：按 alias 从 dataset_cache 取数据 → flatten_3d → 按索引切片
+    3. 多 alias 时沿 axis=0 concat
+    4. 按通道名组织为 dict
+
+    Returns:
+        {
+            "train": ({"source": src_data, "target": tgt_data},
+                      {"source": src_labels, "target": tgt_labels}),
+            "val":   ({"source_val": src_val_data, "target_val": tgt_val_data},
+                      {"source_val": src_val_labels, "target_val": tgt_val_labels}),
+            "test":  ({"main": tgt_test_data},
+                      {"main": tgt_test_labels}),
+        }
+    """
+    ...
+```
+
+> **flatten_3d**：将 5D 数据 `[n_subjects, n_sessions, n_recordings, n_channels, n_samples]` 的前三维展平为 `[N, n_channels, n_samples]`。这是所有索引切片操作的前置步骤。
+
+#### DataloaderBuilder
 
 ```python
 # ---- experiment/dataloader_builder.py ----
