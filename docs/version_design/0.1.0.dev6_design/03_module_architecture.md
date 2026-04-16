@@ -436,13 +436,13 @@ class DimensionDomainSplitter:
 class ValSplitter:
     """ValSplit 原语：从给定数据中按维度分组后切出验证集。
     
-    用于 source.split 和 transductive target.split。
+    用于 source.split 和 Regular 模式 val_split。
     按 dimension 分组后，将 val_ratio 比例的组整体划入验证集。
     
-    跨数据集场景下，UDAOrchestrator 负责将多个源域数据集展平合并为
-    单一 ndarray 后传入 split()。返回的 SplitResult 中的索引对应合并
-    后的数据。UDAOrchestrator 内部维护合并前各数据集的偏移量映射，
-    以便将合并索引还原回 dict[str, np.ndarray] 形式填入 UDASplitResult。
+    split() 接收单个数据集的 5D ndarray，在该数据集的维度空间内分组。
+    跨数据集场景下，UDAOrchestrator / RegularExecutionStrategy 对每个
+    数据集独立调用 split()，各数据集使用各自的维度结构，避免不同数据集
+    的 subject/session/recording 命名空间混淆。
     """
     
     def __init__(self, dimension: str, val_ratio: float,
@@ -496,9 +496,10 @@ class UDAOrchestrator:
            - dataset: domain_splitter.split(aliases)
            - subject/session: domain_splitter.split(data, alias)
         2. 对每个 domain_fold:
-           a. 收集源域数据 → source_splitter.split() → source train/val
-           b. 收集目标域数据:
-              - inductive: target_splitter.split() → target train/val/test
+           a. 源域划分：对每个源域数据集独立调用 source_splitter.split(data_5d)，
+              各数据集在自身维度空间内分组切出 train/val
+           b. 目标域划分:
+              - inductive: target_splitter.split(data_5d) → target train/val/test
               - transductive: target_train = target_test = 全域数据（各自 copy），target_val = 空
            c. 组合为 UDASplitResult（含 fold_info）
         3. 处理嵌套折叠（inductive + target k-fold 时展平）

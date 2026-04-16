@@ -22,12 +22,14 @@ load datasets → alignment (if multi-dataset)
 
 > **val_ratio 换算**：无 `val_split` 时，`ConfigValidator.normalize()` 在 K-Fold 场景中自动将用户配置的 `val_ratio`（整体比例）换算为 `val_ratio_in_train = val_ratio / (1 - 1/k)`，传给 `KFoldSplitter`。用户无感知。
 
-> **val_split 独立划分**：若配置了 `val_split`，splitter 的主划分仅产生 train/test。splitter 内部使用 `ValSplitter`（基于 `val_split.dimension`）从每折的 train 中切出 val，最终 `SplitResult` 仍包含 train/val/test 三组索引。对于 `dimension=dataset` 场景，`RegularExecutionStrategy` 先将训练数据集合并，再用 `ValSplitter` 按 `val_split.dimension` 分组切出验证集。
+> **val_split 独立划分**：若配置了 `val_split`，splitter 的主划分仅产生 train/test。splitter 内部使用 `ValSplitter`（基于 `val_split.dimension`）从每折的 train 中切出 val，最终 `SplitResult` 仍包含 train/val/test 三组索引。对于 `dimension=dataset` 场景，`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`——各数据集保持 5D 结构，在自身维度空间内按 `val_split.dimension` 分组切出验证集，避免不同数据集的 subject/session/recording 命名空间混淆。
 
 > **Transform fit 策略（Regular 模式）**：
-> - `scope: per_dataset`（默认）：对每个数据集独立执行——fit 仅在该数据集的 train 部分，transform 在该数据集的 train/val/test 部分。无论单数据集还是多数据集，fit 始终仅在训练集上进行，验证集和测试集不参与 fit。跨数据集场景下，各数据集使用各自的统计量。
-> - `scope: global`：所有数据集的 train 数据合并后 fit，统一 transform 到所有 train/val/test 数据。仅 Regular 模式可用。
-> - 无论何种 scope，验证集和测试集均不参与 fit，以避免数据泄漏。
+> - `scope: per_dataset`（默认）：各数据集独立标准化。fit 仅在该数据集内可用的训练数据上进行：
+>   - **数据集内切分**（`dimension=subject/session/recording/flatten`）：fit on 该数据集的 train 部分，transform on 该数据集的 train/val/test 部分。
+>   - **跨数据集**（`dimension=dataset`）：训练数据集 fit on 去掉 val 后的训练部分（有 `val_split` 时）或全量（无 `val_split` 时），transform on 该数据集的 train/val 部分；测试数据集 fit on 自身全量数据（无训练部分可用），transform on 自身全量数据。各数据集使用各自的统计量，互不影响。
+> - `scope: global`：所有数据集的训练数据合并后 fit，统一 transform 到所有 train/val/test 数据。仅 Regular 模式可用。
+> - 无论何种 scope，验证集和测试集均不参与 fit（跨数据集场景下测试数据集 fit on 自身全量属于特殊情况：该数据集整体为 test，无训练部分可用），以避免数据泄漏。
 
 **自动通道映射规则（Regular 模式）**：
 - 单数据集：channel name = `"main"`
@@ -84,51 +86,38 @@ load datasets → alignment (if cross-dataset)
 > - **单数据集 UDA**：源域 fit on source_train，目标域 fit on 对应部分（行为一致，只是只有一个数据集）
 > - 每个数据集使用各自的统计量，不同数据集之间互不影响
 
-## 4.3 跨数据集索引合并与还原
+## 4.3 跨数据集 ValSplit 的按数据集独立执行
 
-当 UDA `domain.dimension=dataset` 且源域包含多个数据集时，ValSplitter 需要在合并后的数据上统一按维度分组，再将切分结果还原回各 alias 的局部索引存入 `UDASplitResult`。
+当 UDA `domain.dimension=dataset` 且源域包含多个数据集时，ValSplitter **对每个数据集独立执行**，而非将数据合并后统一切分。
 
-**为什么需要合并**：ValSplitter 只接受单一 ndarray，跨数据集场景必须先将多个 alias 的数据展平合并，才能在统一的维度空间中分组。
-
-**为什么切分后还要还原**：`UDASplitResult` 的字段类型为 `dict[str, np.ndarray]`（alias → 局部索引），这保证了：
-- 自包含性：UDASplitResult + dataset_cache 即可还原数据，不依赖合并顺序等隐式信息
-- 下游统一性：`prepare_uda_channel_data` 对单 alias（数据集内 UDA）和多 alias（跨数据集 UDA）使用同一套循环逻辑
-
-两次合并操作的数据不同——第一次合并全量数据用于分组决策，第二次在下游合并切片后的子集用于构建训练数据。还原步骤是两次操作之间的桥梁。
+**为什么不合并**：
+- `get_groups()` 需要 5D 数据 `[n_subjects, n_sessions, n_recordings, n_channels, n_samples]` 来按维度分组。合并后的 3D 数据 `[sum(N_i), C, T]` 丢失了维度结构，无法正确分组
+- 不同数据集的 subject/session/recording 是独立命名空间（Dataset A 的 subject 1 与 Dataset B 的 subject 1 是不同被试），合并后按维度分组会将不相关的数据混为一组
+- z-score 等 transform 需要在每个数据集的训练部分独立 fit，要求每个数据集有各自的 train/val 划分
 
 **UDAOrchestrator 内部流程（以 source split 为例）**：
 
 ```python
 # 伪代码
 
-# 1. 各 alias 展平为 [N_i, C, T]，记录偏移量
-offset_map = {}   # alias → (start, end)
-arrays = []
-cursor = 0
-for alias in source_aliases:
-    flat = flatten_3d(dataset_cache[alias])  # [N_i, C, T]
-    offset_map[alias] = (cursor, cursor + len(flat))
-    arrays.append(flat)
-    cursor += len(flat)
-
-merged = np.concatenate(arrays, axis=0)  # [sum(N_i), C, T]
-
-# 2. 在合并数据上执行 ValSplit（跨 alias 统一按维度分组）
-split_result = source_splitter.split(merged)
-# split_result.train_indices / val_indices 是合并后的全局索引
-
-# 3. 将全局索引还原回各 alias 的局部索引
 source_train = {}
 source_val = {}
-for alias, (start, end) in offset_map.items():
-    mask_train = (split_result.train_indices >= start) & (split_result.train_indices < end)
-    source_train[alias] = split_result.train_indices[mask_train] - start
+for alias in source_aliases:
+    data_5d = dataset_cache[alias]  # [n_subjects, n_sessions, n_recordings, n_channels, n_samples]
 
-    mask_val = (split_result.val_indices >= start) & (split_result.val_indices < end)
-    source_val[alias] = split_result.val_indices[mask_val] - start
+    # 在每个数据集的 5D 数据上独立执行 ValSplit
+    split_result = source_splitter.split(data_5d)
+    # split_result.train_indices / val_indices 是该数据集展平后的局部索引
+
+    source_train[alias] = split_result.train_indices
+    source_val[alias] = split_result.val_indices
 ```
 
-> **数据集内 UDA**（`domain.dimension=subject/session`）：dict 中只有单个 alias，无需合并和还原，ValSplitter 直接在该 alias 的数据上操作。
+> **数据集内 UDA**（`domain.dimension=subject/session`）：dict 中只有单个 alias，ValSplitter 直接在该 alias 的 5D 数据上操作，行为一致。
+>
+> **Regular 模式 `dimension=dataset` 的 val_split 同理**：`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`，各数据集在自身维度空间内分组切出验证集。
+>
+> **下游合并**：`prepare_uda_channel_data` / `prepare_channel_data` 在索引切片后，将属于同一 phase 的数据集沿 axis=0 concat 构建 dataloader。这是索引切片之后的合并，与 ValSplit 分组无关。
 
 ## 4.4 ValSplit 维度分组处理
 

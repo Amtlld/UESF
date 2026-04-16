@@ -11,7 +11,7 @@
 ```yaml
 strategy: holdout | k-fold        # 划分策略
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
-shuffle: false                     # 是否打乱划分维度上的分组顺序
+shuffle: true                      # 是否打乱划分维度上的分组顺序（默认 true）
                                    # false: 按维度原始顺序依次分配 train → val → test
                                    # true: 先随机打乱分组顺序，再按比例分配
 seed: 42                           # 随机种子（可省略，继承全局 seed）
@@ -33,7 +33,7 @@ val_ratio: 0.1                    # 可选，从整体数据中切出验证集�
 val_split:
   dimension: subject | session | recording | flatten  # 验证集划分维度
   val_ratio: 0.1                   # 从训练集中切出验证集的比例
-  shuffle: true                    # 是否打乱
+  shuffle: true                    # 是否打乱（默认 true）
 ```
 
 > **val_split 与 val_ratio 互斥**：
@@ -53,7 +53,7 @@ val_split:
 ```yaml
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
 val_ratio: 0.2                             # 从全域数据中切出的验证集比例
-shuffle: true                              # 是否打乱分组顺序
+shuffle: true                              # 是否打乱分组顺序（默认 true）
                                            # false: 按维度原始顺序，尾部组划入 val
                                            # true: 先随机打乱分组顺序，再按比例切出 val
 ```
@@ -67,12 +67,21 @@ shuffle: true                              # 是否打乱分组顺序
 ```yaml
 strategy: holdout | k-fold
 dimension: dataset | subject | session
+shuffle: true                      # 是否打乱分组顺序（默认 true）
+                                   # dimension=subject/session 时生效：
+                                   #   false: 按维度原始顺序，前部组划入 source，尾部组划入 target
+                                   #   true: 先随机打乱分组顺序，再按比例分配
+                                   # dimension=dataset 时：
+                                   #   holdout 为显式指派（shuffle 无效）
+                                   #   k-fold 控制轮换顺序
 # holdout + dataset: 显式指定 source/target
 # holdout + subject/session: target_count 或 target_ratio（二者互斥）
 # k-fold: k（-1 = leave-one-out）
 ```
 
 > **设计说明**：`dataset` 维度仅出现在 DomainPartition 中，不出现在 Split Block / ValSplit Block 中。跨数据集的 Regular 模式操作由 `split.dimension: dataset` 专门处理。
+>
+> **不支持 `recording` 维度**：DomainPartition 当前不支持 `dimension: recording`。Recording 通常是同一 subject 同一 session 内的重复采集，跨 recording 的域偏移较小，UDA 意义有限。如有需求，后续版本可扩展。
 
 ---
 
@@ -215,9 +224,9 @@ uda:
   adaptation: transductive | inductive
 
   # -------- 第三层：域内划分 --------
-  source:
-    split:                    # ValSplit — 源域 train/val 划分
-      dimension: recording    # 划分维度（不可与 domain.dimension 相同）
+  source:                        # 可选，省略时源域全量数据作为训练集，无验证集
+    split:                       # ValSplit — 源域 train/val 划分
+      dimension: recording       # 划分维度（不可与 domain.dimension 相同）
       val_ratio: 0.2
       shuffle: true
 
@@ -226,10 +235,10 @@ uda:
       strategy: holdout       # holdout 或 k-fold
       dimension: recording    # 划分维度（不可与 domain.dimension 相同）
       train_ratio: 0.7
-      val_ratio: 0.1          # 与 val_split 互斥
+      val_ratio: 0.1          # 可选，与 val_split 互斥；省略时目标域仅 train/test 二路切分，无验证集
       test_ratio: 0.2
       shuffle: true
-      # 或使用 val_split 独立指定验证集划分维度（与 val_ratio 互斥）:
+      # 或使用 val_split 独立指定验证集划分维度（可选，与 val_ratio 互斥）:
       # val_split:
       #   dimension: flatten
       #   val_ratio: 0.1
@@ -237,9 +246,10 @@ uda:
 ```
 
 > **关键约束**：
+> - `source` 块整体可选。省略时源域全量数据作为训练集，`source_val` 为空数组，不构建 source_val dataloader
 > - `source.split` 使用 **ValSplit** 结构：仅 `dimension + val_ratio + shuffle`，不含 `strategy`、`train_ratio`、`test_ratio`（源域永远不做测试）
 > - `transductive` 模式下，`target.split` **不可出现**。目标域全量数据同时用于无监督训练和测试。当前版本不支持 transductive 下的 checkpoint/早停逻辑
-> - `inductive` 模式下，`target.split` 使用完整 **Split Block** 结构（必须包含 `test_ratio` 或 `k`），支持 `val_split` 子块以独立指定验证集划分维度。Checkpoint 选择和早停基于目标域验证集上的指标
+> - `inductive` 模式下，`target.split` 使用完整 **Split Block** 结构（必须包含 `test_ratio` 或 `k`），验证集配置（`val_ratio` 或 `val_split`）可选——省略时目标域仅 train/test 二路切分，`target_val` 为空数组。Checkpoint 选择和早停基于目标域验证集上的指标（无验证集时不可配置 checkpoint/早停）
 > - `domain.dimension` 不可与 `source.split.dimension` 或 `target.split.dimension` 相同（防止语义冲突和边界退化）
 > - `target_count` 和 `target_ratio` 互斥，不可同时出现
 >
@@ -393,7 +403,13 @@ datasets:                         # 必填，至少一个
     transforms:                   # 可选，后处理变换
       - name: zscore_normalize
         scope: per_dataset | global  # 可选，默认 per_dataset
-                                     # per_dataset: 各数据集内独立，fit 仅在该数据集的训练集上，transform 在该数据集的 train/val/test 上
+                                     # per_dataset: 各数据集内独立标准化。fit 仅在该数据集内可用的训练数据上进行：
+                                     #   - 数据集内切分（dimension=subject/session/recording/flatten）：fit on 该数据集的 train 部分，transform on train/val/test
+                                     #   - 跨数据集（dimension=dataset）：训练数据集 fit on 去掉 val 后的训练部分（有 val_split 时）或全量（无 val_split 时），
+                                     #     transform on 该数据集的 train/val 部分；测试数据集 fit on 自身全量数据，transform on 自身全量数据。
+                                     #     各数据集使用各自的统计量，互不影响。
+                                     #     注：测试数据集 fit on 自身是 per_dataset 语义下的必然行为——该数据集整体作为测试集，
+                                     #     不存在训练部分可用于 fit。若希望使用训练集统计量 transform 测试集，应使用 scope: global
                                      # global: 所有数据集的训练集合并后 fit，统一 transform 全部数据（仅 Regular 模式可用）
 
 # ---- 跨数据集对齐（多数据集时） ----
@@ -408,7 +424,7 @@ mode: regular | uda               # 可选，默认 regular
 split:                            # mode=regular 时必填
   strategy: holdout | k-fold
   dimension: subject | session | recording | flatten | dataset
-  shuffle: bool
+  shuffle: bool                   # 默认 true
   # holdout 参数（无 val_split 时三路切分）:
   train_ratio: float
   val_ratio: float                # 与 val_split 互斥
@@ -426,13 +442,14 @@ split:                            # mode=regular 时必填
   val_split:
     dimension: subject | session | recording | flatten
     val_ratio: float
-    shuffle: bool
+    shuffle: bool                 # 默认 true
 
 # ---- UDA 模式配置 ----
 uda:                              # mode=uda 时必填
   domain:                         # DomainPartition
     strategy: holdout | k-fold
     dimension: dataset | subject | session
+    shuffle: bool                 # 默认 true。是否打乱分组顺序（dimension=subject/session 时生效；dimension=dataset + holdout 时无效）
     # holdout + dataset:
     source: [alias, ...]
     target: alias
@@ -441,24 +458,24 @@ uda:                              # mode=uda 时必填
     # k-fold:
     k: int                        # -1 = leave-one-out
   adaptation: transductive | inductive
-  source:                         # ValSplit
-    split:
+  source:                         # 可选，省略时源域全量数据作为训练集，无验证集
+    split:                        # ValSplit
       dimension: subject | session | recording | flatten  # 不可与 domain.dimension 相同
       val_ratio: float
-      shuffle: bool
+      shuffle: bool               # 默认 true
   target:
     split:                        # inductive 时必填（Split Block）; transductive 时不可出现
       # inductive 使用完整 Split Block:
       strategy: holdout | k-fold
       dimension: subject | session | recording | flatten  # 不可与 domain.dimension 相同
-      # holdout: train_ratio, val_ratio, test_ratio（或 train_ratio, test_ratio + val_split）
-      # k-fold: k, val_ratio（或 k + val_split）
-      shuffle: bool
+      # holdout: train_ratio, test_ratio 必填；val_ratio 可选（或用 val_split 代替），省略时无验证集
+      # k-fold: k 必填；val_ratio 可选（或用 val_split 代替），省略时无验证集
+      shuffle: bool               # 默认 true
       # 验证集独立划分（可选，与主划分 val_ratio 互斥）:
       val_split:
         dimension: subject | session | recording | flatten
         val_ratio: float
-        shuffle: bool
+        shuffle: bool             # 默认 true
 
 # ---- 模型 ----
 model:
