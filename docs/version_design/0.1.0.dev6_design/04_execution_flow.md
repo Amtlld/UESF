@@ -11,8 +11,8 @@ load dataset → （无需 alignment）
     → create_splitter(split_config) → HoldoutSplitter | KFoldSplitter
     → splitter.split(data_5d) → folds: list[SplitResult]
     → for each fold:
-        → apply_transforms_per_dataset / apply_transforms_global
-              (dataset_cache, split_indices)  # 原地修改 dataset_cache
+        → apply_transforms(transforms_per_alias, dataset_cache, split_indices)
+              # 统一入口，内部按 transform 步骤 scope 分发；原地修改 dataset_cache
         → for phase in [train, val, test]:
             prepare_channel_data(split_result, dataset_cache, phase)
                 → channel_data, channel_labels  # 使用已 transform 的 dataset_cache
@@ -43,8 +43,8 @@ load datasets → alignment
               "train": {alias: train_idx, ...},
               "val":   {alias: val_idx, ...},
               "test":  {alias: all_idx, ...}})
-        → apply_transforms_per_dataset / apply_transforms_global
-              (dataset_cache, split_indices)  # 原地修改 dataset_cache
+        → apply_transforms(transforms_per_alias, dataset_cache, split_indices)
+              # 统一入口，内部按 transform 步骤 scope 分发；原地修改 dataset_cache
         → for phase in [train, val, test]:
             prepare_channel_data(multi_result, dataset_cache, phase)
                 → channel_data, channel_labels  # 使用已 transform 的 dataset_cache
@@ -64,7 +64,8 @@ load datasets → alignment
 > - **路径 B**（dimension = dataset）：`DatasetLevelSplitResult` 仅包含 alias 级 train/test 划分。`RegularExecutionStrategy` 对每个训练数据集独立调用 `ValSplitter`——各数据集保持 5D 结构，在自身维度空间内按 `val_split.dimension` 分组切出验证集，避免不同数据集的 subject/session/recording 命名空间混淆。最终汇总为 `MultiDatasetSplitResult`，统一传入 `prepare_channel_data`。
 
 > **Transform fit 策略（Regular 模式）**：
-> 通过 `apply_transforms_per_dataset()` 或 `apply_transforms_global()` 函数执行：
+> 通过统一入口 `apply_transforms(transforms_per_alias, ...)` 执行，内部按 transform 步骤
+> scope 分发（混合 scope 在配置校验阶段被 R29 拦截；单数据集场景下 per_dataset 与 global 行为等价）：
 > - `scope: per_dataset`（默认）：调用 `apply_transforms_per_dataset()`。各数据集独立标准化，使用各自统计量：
 >   - **数据集内切分**（路径 A）：fit on 该数据集的 train 部分，transform on 该数据集的 train/val/test。
 >   - **跨数据集**（路径 B）：
@@ -94,7 +95,7 @@ load datasets → alignment (if cross-dataset)
     → create_uda_orchestrator(uda_config)
     → orchestrator.split(dataset_cache) → uda_folds: list[UDASplitResult]
     → for each uda_fold:
-        → apply_transforms_uda(transforms_config, dataset_cache, uda_split, adaptation)
+        → apply_transforms_uda(transforms_per_alias, dataset_cache, uda_split, adaptation)
               # 原地修改 dataset_cache
         → prepare_uda_channel_data(uda_split, dataset_cache)
             → {"train": (channel_data, channel_labels),
@@ -122,7 +123,7 @@ load datasets → alignment (if cross-dataset)
 > Trainer 的 `training_step(batch)` 签名不变。UDA Trainer 自行从 `batch["source"]` 和 `batch["target"]` 中取数据，实现域适应逻辑。
 
 > **Transform fit 策略（UDA 模式）**：
-> 通过 `apply_transforms_uda()` 函数执行。UDA 模式始终使用 per_dataset 语义——各数据集内独立 fit & transform（`apply_transforms_uda` 内部委托 `apply_transforms_per_dataset`，通过构造不同的 `split_indices` 和 `fit_phase` 参数实现源域/目标域差异化行为）：
+> 通过 `apply_transforms_uda(transforms_per_alias, ...)` 执行。UDA 模式始终使用 per_dataset 语义（R23）——各数据集内独立 fit & transform。`apply_transforms_uda` 内部按步骤顺序遍历，为源域/目标域分别构造 `split_indices` 和 `fit_phase`，委托给步骤级助手 `_apply_step_per_dataset` 实现差异化行为：
 > - **源域各数据集**：fit on 该数据集的 source_train 部分，transform 该数据集的 source_train / source_val
 > - **目标域各数据集（inductive）**：fit on 该数据集的 target_train 部分，transform 该数据集的 target_train / target_val / target_test
 > - **目标域各数据集（transductive）**：fit on 该数据集的目标域全量数据，transform 同一份数据。当前版本不支持 transductive 下的 checkpoint/早停
@@ -198,7 +199,14 @@ total_folds = domain_folds × target_inner_folds
 # 伪代码
 all_splits = []
 for d_idx, domain_fold in enumerate(domain_splitter.split(...)):
-    source_split = source_splitter.split(source_data)     # 单个 SplitResult
+    if source_splitter is not None:                       # source 块存在
+        source_split = source_splitter.split(source_data) # 单个 SplitResult
+    else:                                                  # source 省略：全量 train, 空 val
+        source_split = SplitResult(
+            train_indices=all_source_indices,
+            val_indices=np.array([], dtype=int),
+            test_indices=np.array([], dtype=int),
+        )
     target_splits = target_splitter.split(target_data)     # k 个 SplitResult
     for t_idx, target_split in enumerate(target_splits):
         all_splits.append(UDASplitResult(

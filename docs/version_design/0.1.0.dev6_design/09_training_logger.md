@@ -44,6 +44,7 @@ class TrainingLogger(Protocol):
     """训练日志写入协议。
 
     Runner 仅依赖此协议，不依赖具体实现。
+    支持 context manager 模式，确保异常时也能 flush 并关闭。
     """
 
     def log_scalars(self, tag_value_dict: dict[str, float], step: int) -> None:
@@ -66,6 +67,14 @@ class TrainingLogger(Protocol):
 
     def close(self) -> None:
         """释放资源（关闭文件句柄、flush 缓冲区等）。"""
+        ...
+
+    def __enter__(self) -> "TrainingLogger":
+        """进入 context manager，返回自身。"""
+        ...
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """退出 context manager，调用 close()（异常时也能安全关闭）。"""
         ...
 ```
 
@@ -94,6 +103,12 @@ class TensorBoardLogger:
     def close(self) -> None:
         self.writer.flush()
         self.writer.close()
+
+    def __enter__(self) -> "TensorBoardLogger":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 ```
 
 **延迟 import 策略**：`SummaryWriter` 在 `__init__` 中才 import，未配置 logging 时 `tensorboard` 包不会被加载，不影响无 TensorBoard 环境下的框架运行。
@@ -148,31 +163,29 @@ class Runner:
 
         # ... 现有初始化逻辑 ...
 
-        for epoch in range(self.epochs):
-            train_metrics = self.train_epoch(train_loader, optimizer, epoch)
+        # 使用 context manager 包裹训练循环，确保异常时 logger 也能安全关闭
+        logger_cm = logger if logger is not None else _NullContext()
+        with logger_cm:
+            for epoch in range(self.epochs):
+                train_metrics = self.train_epoch(train_loader, optimizer, epoch)
 
-            val_metrics = {}
-            if val_loader and len(val_loader) > 0:
-                val_metrics, _, _ = self.validate_epoch(val_loader)
-                val_metrics = {f"val_{k}": v for k, v in val_metrics.items()}
+                val_metrics = {}
+                if val_loader and len(val_loader) > 0:
+                    val_metrics, _, _ = self.validate_epoch(val_loader)
+                    val_metrics = {f"val_{k}": v for k, v in val_metrics.items()}
 
-            # --- 日志记录（新增） ---
-            if logger and (epoch + 1) % log_every_n_epochs == 0:
-                scalars = {**train_metrics, **val_metrics}
-                # 记录学习率
-                scalars["lr"] = optimizer.param_groups[0]["lr"]
-                logger.log_scalars(scalars, step=epoch)
+                # --- 日志记录（新增） ---
+                if logger is not None and (epoch + 1) % log_every_n_epochs == 0:
+                    scalars = {**train_metrics, **val_metrics}
+                    scalars["lr"] = optimizer.param_groups[0]["lr"]
+                    logger.log_scalars(scalars, step=epoch)
 
-            # ... 现有 scheduler / checkpoint / early_stopping 逻辑不变 ...
-
-        # --- 关闭 logger（新增） ---
-        if logger:
-            logger.close()
+                # ... 现有 scheduler / checkpoint / early_stopping 逻辑不变 ...
 
         return { ... }
 ```
 
-**改动范围**：仅 `run()` 签名增加两个可选参数 + 循环体内增加一个 `if` 块 + 循环结束后 `close()`。其余方法（`train_epoch`、`validate_epoch`）完全不变。
+**改动范围**：仅 `run()` 签名增加两个可选参数 + 循环体用 `with` 包裹 + 循环体内增加一个 `if` 块。其余方法（`train_epoch`、`validate_epoch`）完全不变。Logger 的关闭由 `__exit__` 自动完成，异常时也能 flush。
 
 ## 9.5 记录的指标
 
@@ -238,15 +251,13 @@ class RegularExecutionStrategy:
                 sample_input = _get_sample_input(train_loader)
                 logger.log_graph(model, sample_input)
 
-            # 训练
+            # 训练（logger 的关闭由 runner.run() 内部的 with 块自动处理）
             result = runner.run(
                 train_loader, val_loader, optimizer,
                 logger=logger,
                 log_every_n_epochs=log_every_n,
                 ...
             )
-
-            # logger.close() 由 runner.run() 内部调用
 ```
 
 `UDAExecutionStrategy` 同理，无需额外处理。

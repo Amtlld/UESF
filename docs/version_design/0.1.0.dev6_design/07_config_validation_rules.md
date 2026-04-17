@@ -30,6 +30,8 @@
 | R26 | flatten 维度禁止 shuffle=False | 任意划分原语（Split Block / ValSplit / val_split 子块）中 `dimension=flatten` 时，`shuffle` 必须为 `true`。flatten 语义为"将 (subject, session, recording) 展平后随机切分"，顺序遍历无明确物理意义，抛出 `TypeMismatchError` |
 | R27 | shuffle 默认值 | 所有划分原语（Split Block / ValSplit / DomainPartition）中 `shuffle` 字段未显式指定时，默认为 `true`。由 `ConfigValidator.normalize()` 填充 |
 | R28 | DomainPartition 维度白名单 | `uda.domain.dimension` 仅允许 `dataset | subject | session`。当前版本不支持 `recording`（跨 recording 域偏移小，UDA 意义有限）和 `flatten`（与域划分的隔离语义冲突）。其他值抛出 `TypeMismatchError` |
+| R29 | 跨数据集 transforms 管线一致 | 多数据集场景（`split.dimension=dataset` 或 `uda.domain.dimension=dataset`）下，参与同一次 `apply_transforms`/`apply_transforms_uda` 调用的各 alias，其 `transforms` 列表必须**长度相同**，且**相同位置的 `name` 与 `scope` 完全一致**。否则无法在步骤级按 scope 分发。校验由 `ConfigValidator.validate()` 在规范化后执行；不一致时抛出 `ConfigError` |
+| R30 | val_split 维度偏序约束 | 当 Regular 主 `split.dimension` ∈ `{subject, session, recording}` 时，`val_split.dimension` 可为任意 `subject | session | recording | flatten`（训练子集沿主维度切片后仍为干净 5D，`ValSplitter` 可直接 `get_groups`）；当主 `split.dimension=flatten` 时，`val_split.dimension` 必须也为 `flatten`——flatten 切分后训练子集不再保持 5D 结构，无法在其他维度上分组。其他组合抛出 `ConfigError` |
 
 ---
 

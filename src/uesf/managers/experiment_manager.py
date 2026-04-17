@@ -596,12 +596,12 @@ class ExperimentManager:
             parts_data, parts_labels = [], []
             for alias in phase_aliases.get(phase, []):
                 d = dataset_cache[alias]["data"]
-                l = dataset_cache[alias]["labels"]
+                lab = dataset_cache[alias]["labels"]
                 if len(d) > 0:
                     for t in transform_instances:
                         d = t.transform(d)
                     parts_data.append(d)
-                    parts_labels.append(l)
+                    parts_labels.append(lab)
 
             if parts_data:
                 target_dict["main"] = EEGDataset(

@@ -92,6 +92,10 @@ class TrainingDivergenceError(ExperimentError):
     """Training divergence detected (e.g., NaN loss)."""
 
 
+class SplitError(ExperimentError):
+    """Splitting stage error (empty group, insufficient groups, etc.)."""
+
+
 # --- Storage errors ---
 
 

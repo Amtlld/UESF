@@ -8,7 +8,6 @@ Provides a dual-channel logging architecture:
 from __future__ import annotations
 
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
