@@ -247,31 +247,3 @@ def get_sample_input(train_loader: CombinedIterator) -> torch.Tensor:
     return data
 
 
-# ---------------------------------------------------------------------------
-# Legacy shim — will be removed once ExperimentManager is rewritten (Stage 6).
-# ---------------------------------------------------------------------------
-
-
-def build_dataloaders(
-    datasets: dict[str, Dataset],
-    batch_size: int = 32,
-    shuffle_train: bool = True,
-    num_workers: int = 0,
-    phase: str = "train",
-) -> CombinedIterator:
-    """Legacy helper — accepts pre-wrapped ``dict[str, Dataset]``.
-
-    Retained temporarily so the unmodified ExperimentManager keeps
-    importing. Stage 6 deletes this along with the caller.
-    """
-    should_shuffle = shuffle_train and phase == "train"
-    loaders: dict[str, DataLoader] = {}
-    for name, dataset in datasets.items():
-        loaders[name] = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=should_shuffle,
-            num_workers=num_workers,
-            drop_last=False,
-        )
-    return CombinedIterator(loaders)

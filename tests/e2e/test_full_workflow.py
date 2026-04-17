@@ -1,11 +1,7 @@
-"""E2E test: full workflow from preprocessed dataset to experiment results.
+"""E2E tests: full workflow from preprocessed dataset to experiment results.
 
-This test simulates a complete UESF workflow:
-1. Create fake preprocessed dataset (.npy files + DB record)
-2. Initialize a project with model/trainer
-3. Create experiment config
-4. Run the experiment
-5. Query results
+Uses the dev6 YAML surface — top-level `split`, `mode: regular | uda`,
+`training.logging`, auto-wired channel mapping (no `dataloaders` section).
 """
 
 from __future__ import annotations
@@ -26,14 +22,12 @@ from uesf.managers.trainer_manager import TrainerManager
 
 @pytest.fixture
 def setup_env(uesf_home, db):
-    """Set up a complete environment for E2E testing."""
     config = ConfigManager(db, uesf_home)
     project_mgr = ProjectManager(db, config)
     model_mgr = ModelManager(db, config)
     trainer_mgr = TrainerManager(db, config)
     metric_mgr = MetricManager(db, config)
     exp_mgr = ExperimentManager(db, config, project_mgr, model_mgr, trainer_mgr, metric_mgr)
-
     return {
         "db": db,
         "config": config,
@@ -47,22 +41,16 @@ def setup_env(uesf_home, db):
 
 def _create_fake_preprocessed(
     db, data_dir: Path, name: str,
-    n_subjects=6, n_sessions=2, n_recordings=5,
-    n_channels=8, n_timepoints=50, n_classes=2,
+    n_subjects=4, n_sessions=2, n_recordings=5,
+    n_channels=8, n_timepoints=32, n_classes=2,
 ):
-    """Create a fake preprocessed 5-D dataset with .npy files and DB record.
-
-    Shape: [subject, session, recording, channel, sample].
-    """
     ds_dir = data_dir / name
     ds_dir.mkdir(parents=True)
-
     data = np.random.randn(
-        n_subjects, n_sessions, n_recordings, n_channels, n_timepoints,
+        n_subjects, n_sessions, n_recordings, n_channels, n_timepoints
     ).astype(np.float32)
-    total_recordings = n_subjects * n_sessions * n_recordings
-    labels = np.random.randint(0, n_classes, total_recordings).astype(np.int64)
-
+    total = n_subjects * n_sessions * n_recordings
+    labels = np.random.randint(0, n_classes, total).astype(np.int64)
     np.save(str(ds_dir / "eeg_data.npy"), data)
     np.save(str(ds_dir / "labels.npy"), labels)
 
@@ -73,222 +61,160 @@ def _create_fake_preprocessed(
             n_subjects, n_channels, n_samples)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (name, str(ds_dir), shape_str,
-         '{"0": "class_0", "1": "class_1"}', n_subjects, n_channels, n_timepoints),
+         '{"0": "class_0", "1": "class_1"}',
+         n_subjects, n_channels, n_timepoints),
     )
     db.commit()
-
     return ds_dir
 
 
-def _create_project_with_dummy(project_dir: Path, dataset_name: str):
-    """Create a project with DummyModel and DummyTrainer pointing to built-in code."""
+def _create_project_with_dummy(project_dir: Path, dataset_names: list[str]):
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "experiments").mkdir(exist_ok=True)
 
-    # Write model file
-    model_file = project_dir / "model.py"
-    model_file.write_text(
-        'from uesf.components.dummy import DummyModel\n',
-        encoding="utf-8",
+    (project_dir / "model.py").write_text(
+        "from uesf.components.dummy import DummyModel\n", encoding="utf-8"
+    )
+    (project_dir / "trainer.py").write_text(
+        "from uesf.components.dummy import DummyTrainer\n", encoding="utf-8"
     )
 
-    # Write trainer file
-    trainer_file = project_dir / "trainer.py"
-    trainer_file.write_text(
-        'from uesf.components.dummy import DummyTrainer\n',
-        encoding="utf-8",
-    )
-
-    # Write project.yml
     project_config = {
         "project-name": "test_project",
         "description": "E2E test project",
-        "preprocessed_datasets": [dataset_name],
+        "preprocessed_datasets": dataset_names,
         "models": {
             "dummy_model": {
-                "entrypoint": f"{model_file}:DummyModel",
-            },
+                "entrypoint": f"{project_dir / 'model.py'}:DummyModel",
+            }
         },
         "trainers": {
             "dummy_trainer": {
-                "entrypoint": f"{trainer_file}:DummyTrainer",
-            },
+                "entrypoint": f"{project_dir / 'trainer.py'}:DummyTrainer",
+            }
         },
     }
-
-    yml_path = project_dir / "project.yml"
-    yml_path.write_text(
-        yaml.dump(project_config, default_flow_style=False),
-        encoding="utf-8",
-    )
-
-    return yml_path
+    yml = project_dir / "project.yml"
+    yml.write_text(yaml.dump(project_config, default_flow_style=False), encoding="utf-8")
+    return yml
 
 
-def _create_experiment_yml(project_dir: Path, dataset_name: str, experiment_name: str = "test_exp"):
-    """Create a minimal experiment YAML file."""
-    exp_config = {
-        "name": experiment_name,
-        "description": "E2E test experiment",
-        "seed": 42,
-        "model": {
-            "name": "dummy_model",
-            "params": {},
-        },
-        "trainer": {
-            "name": "dummy_trainer",
-            "params": {},
-        },
-        "datasets": {
-            "main_dataset": {
-                "name": dataset_name,
-                "split": {
-                    "strategy": "holdout",
-                    "dimension": "none",
-                    "shuffle": True,
-                    "train_ratio": 0.6,
-                    "val_ratio": 0.2,
-                    "test_ratio": 0.2,
-                },
-                "transforms": [
-                    {"name": "zscore_normalize", "fit_on": "train", "apply_to": "all"},
-                ],
-            },
-        },
-        "dataloaders": {
-            "train": {"main": "main_dataset.train"},
-            "val": {"main": "main_dataset.val"},
-            "test": {"main": "main_dataset.test"},
-        },
-        "training": {
-            "epochs": 3,
-            "batch_size": 8,
-            "optimizer": {
-                "name": "adam",
-                "params": {"lr": 0.01},
-            },
-        },
-        "evaluation": {
-            "metrics": ["accuracy", "f1_score"],
-            "k_fold_aggregation": "concat",
-        },
-        "logging": {
-            "use_wandb": False,
-            "checkpoint_metric": "val_accuracy",
-        },
-    }
-
+def _write_experiment(project_dir: Path, experiment_name: str, exp_config: dict) -> Path:
+    (project_dir / "experiments").mkdir(exist_ok=True)
     yml_path = project_dir / "experiments" / f"{experiment_name}.yml"
-    yml_path.write_text(
-        yaml.dump(exp_config, default_flow_style=False),
-        encoding="utf-8",
-    )
+    yml_path.write_text(yaml.dump(exp_config, default_flow_style=False), encoding="utf-8")
     return yml_path
 
 
 class TestFullWorkflow:
-    def test_end_to_end(self, setup_env, tmp_path):
-        """Complete workflow: create dataset → project → experiment → run → query."""
+    def test_regular_holdout_subject(self, setup_env, tmp_path):
         env = setup_env
-        data_dir = tmp_path / "data"
-        project_dir = tmp_path / "project"
-        dataset_name = "fake_preprocessed"
+        _create_fake_preprocessed(env["db"], tmp_path / "data", "ds1")
+        _create_project_with_dummy(tmp_path / "project", ["ds1"])
 
-        # 1. Create fake preprocessed dataset
-        _create_fake_preprocessed(env["db"], data_dir, dataset_name)
-
-        # 2. Create project
-        _create_project_with_dummy(project_dir, dataset_name)
-
-        # 3. Create experiment config
-        _create_experiment_yml(project_dir, dataset_name)
-
-        # 4. Run experiment
-        results = env["exp_mgr"].run(project_dir, "test_exp")
-
-        # 5. Verify results
-        assert "epochs_run" in results
-        assert results["epochs_run"] == 3
-
-        # Check test metrics exist
-        assert "test_accuracy" in results or "val_accuracy" in results
-
-        # 6. Query results
-        experiments = env["exp_mgr"].query(
-            project_name="test_project",
-            status="COMPLETED",
-        )
-        assert len(experiments) == 1
-        assert experiments[0]["experiment_name"] == "test_exp"
-        assert experiments[0]["status"] == "COMPLETED"
-
-    def test_kfold_workflow(self, setup_env, tmp_path):
-        """K-Fold cross-validation workflow."""
-        env = setup_env
-        data_dir = tmp_path / "data"
-        project_dir = tmp_path / "project"
-        dataset_name = "kfold_dataset"
-
-        _create_fake_preprocessed(env["db"], data_dir, dataset_name, n_subjects=3, n_sessions=2, n_recordings=5)
-        _create_project_with_dummy(project_dir, dataset_name)
-
-        # Create K-Fold experiment config
         exp_config = {
-            "name": "kfold_exp",
+            "experiment_name": "reg_holdout",
             "seed": 42,
+            "datasets": {"main": {"name": "ds1"}},
+            "split": {
+                "strategy": "holdout",
+                "dimension": "subject",
+                "train_ratio": 0.5,
+                "val_ratio": 0.25,
+                "test_ratio": 0.25,
+                "shuffle": True,
+            },
             "model": {"name": "dummy_model", "params": {}},
             "trainer": {"name": "dummy_trainer", "params": {}},
-            "datasets": {
-                "main_dataset": {
-                    "name": dataset_name,
-                    "split": {
-                        "strategy": "k-fold",
-                        "dimension": "none",
-                        "k-folds": 3,
-                        "shuffle": True,
-                    },
+            "training": {
+                "epochs": 2,
+                "batch_size": 4,
+                "optimizer": {"name": "adam", "params": {"lr": 0.01}},
+            },
+            "evaluation": {"metrics": ["accuracy"], "k_fold_aggregation": "concat"},
+        }
+        _write_experiment(tmp_path / "project", "reg_holdout", exp_config)
+
+        results = env["exp_mgr"].run(tmp_path / "project", "reg_holdout")
+        assert results["n_folds"] == 1
+        assert results["fold_results"][0]["failed"] is False
+        assert "test_accuracy" in results["aggregated_metrics"] or "test_accuracy" in results
+
+        experiments = env["exp_mgr"].query(project_name="test_project", status="COMPLETED")
+        assert len(experiments) == 1
+
+    def test_regular_kfold_subject_with_val_split(self, setup_env, tmp_path):
+        env = setup_env
+        _create_fake_preprocessed(
+            env["db"], tmp_path / "data", "kf_ds", n_subjects=4, n_sessions=2, n_recordings=4,
+        )
+        _create_project_with_dummy(tmp_path / "project", ["kf_ds"])
+
+        exp_config = {
+            "experiment_name": "reg_kfold",
+            "seed": 0,
+            "datasets": {"main": {"name": "kf_ds"}},
+            "split": {
+                "strategy": "k-fold",
+                "dimension": "subject",
+                "k": 4,
+                "val_split": {
+                    "dimension": "recording",
+                    "val_ratio": 0.25,
+                    "shuffle": False,
                 },
+                "shuffle": False,
             },
-            "dataloaders": {
-                "train": {"main": "main_dataset.train"},
-                "test": {"main": "main_dataset.test"},
+            "model": {"name": "dummy_model", "params": {}},
+            "trainer": {"name": "dummy_trainer", "params": {}},
+            "training": {
+                "epochs": 1,
+                "batch_size": 4,
+                "optimizer": {"name": "adam", "params": {"lr": 0.01}},
             },
-            "training": {"epochs": 2, "batch_size": 8, "optimizer": {"name": "adam", "params": {"lr": 0.01}}},
             "evaluation": {"metrics": ["accuracy"], "k_fold_aggregation": "mean_std"},
         }
+        _write_experiment(tmp_path / "project", "reg_kfold", exp_config)
 
-        (project_dir / "experiments").mkdir(exist_ok=True)
-        yml_path = project_dir / "experiments" / "kfold_exp.yml"
-        yml_path.write_text(yaml.dump(exp_config, default_flow_style=False), encoding="utf-8")
-
-        results = env["exp_mgr"].run(project_dir, "kfold_exp")
-        assert results["n_folds"] == 3
-        assert "fold_results" in results
+        results = env["exp_mgr"].run(tmp_path / "project", "reg_kfold")
+        assert results["n_folds"] == 4
+        for fr in results["fold_results"]:
+            assert fr["failed"] is False
+            assert "fold_idx" in fr["fold_info"]
 
     def test_experiment_add_and_list(self, setup_env, tmp_path):
-        """Test experiment add and list CLI-level operations."""
         env = setup_env
         project_dir = tmp_path / "proj"
         env["project_mgr"].init(project_dir)
+        yml = env["exp_mgr"].add(project_dir, experiment_name="my_exp")
+        assert yml.exists() and "my_exp" in yml.name
 
-        # Add experiment
-        yml_path = env["exp_mgr"].add(project_dir, experiment_name="my_exp")
-        assert yml_path.exists()
-        assert "my_exp" in yml_path.name
-
-    def test_failed_experiment_records_status(self, setup_env, tmp_path):
-        """Experiment that fails should have FAILED status in DB."""
+    def test_missing_dataset_fails_with_failed_status(self, setup_env, tmp_path):
         env = setup_env
         project_dir = tmp_path / "project"
-        _create_project_with_dummy(project_dir, "nonexistent_dataset")
+        _create_project_with_dummy(project_dir, ["nonexistent"])
 
-        # Create experiment with nonexistent dataset
-        _create_experiment_yml(project_dir, "nonexistent_dataset", "fail_exp")
+        exp_config = {
+            "experiment_name": "fail_exp",
+            "seed": 42,
+            "datasets": {"main": {"name": "nonexistent"}},
+            "split": {
+                "strategy": "holdout",
+                "dimension": "subject",
+                "train_ratio": 0.7,
+                "val_ratio": 0.15,
+                "test_ratio": 0.15,
+            },
+            "model": {"name": "dummy_model", "params": {}},
+            "trainer": {"name": "dummy_trainer", "params": {}},
+            "training": {"epochs": 1, "batch_size": 4, "optimizer": {"name": "adam", "params": {"lr": 0.01}}},
+            "evaluation": {"metrics": ["accuracy"]},
+        }
+        _write_experiment(project_dir, "fail_exp", exp_config)
 
         with pytest.raises(Exception):
             env["exp_mgr"].run(project_dir, "fail_exp")
 
-        # Check DB record
-        experiments = env["exp_mgr"].query(project_name="test_project", status="FAILED")
-        assert len(experiments) == 1
-        assert experiments[0]["status"] == "FAILED"
+        failed = env["exp_mgr"].query(project_name="test_project", status="FAILED")
+        assert len(failed) == 1
+        assert failed[0]["status"] == "FAILED"
