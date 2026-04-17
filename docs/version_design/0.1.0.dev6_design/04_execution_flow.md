@@ -57,7 +57,7 @@ load datasets → alignment
     → aggregate fold results → final_results
 ```
 
-> **val_ratio 换算**：无 `val_split` 时，`ConfigValidator.normalize()` 在 K-Fold 场景中自动将用户配置的 `val_ratio`（整体比例）换算为 `val_ratio_in_train = val_ratio / (1 - 1/k)`，传给 `KFoldSplitter`。用户无感知。
+> **val_ratio 换算**：无 `val_split` 时，`ConfigValidator.normalize()` 在 K-Fold 场景中自动将用户配置的 `val_ratio`（整体比例）换算为 `val_ratio_in_train = val_ratio / (1 - 1/k)`，传给 `KFoldSplitter`。`KFoldSplitter` 在每折内部从 train 部分按**主 `split.dimension`** 分组后再按 `val_ratio_in_train` 切出 val——与 test 同维度，不会退化为样本级随机切分。Holdout 同理：无 `val_split` 时 train/val/test 均在同一 `dimension` 上按比例切。用户无感知。
 
 > **val_split 独立划分**：
 > - **路径 A**（dimension ≠ dataset）：若配置了 `val_split`，splitter 的主划分仅产生 train/test。splitter 内部使用 `ValSplitter`（基于 `val_split.dimension`）从每折的 train 中切出 val，最终 `SplitResult` 仍包含 train/val/test 三组索引。

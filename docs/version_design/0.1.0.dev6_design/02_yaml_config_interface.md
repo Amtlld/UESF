@@ -13,8 +13,16 @@ strategy: holdout | k-fold        # 划分策略
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
          # Regular 模式顶层 split 额外支持 dataset（见 2.2）
 shuffle: true                      # 是否打乱划分维度上的分组顺序（默认 true，见 R27）
-                                   # false: 按维度原始顺序依次分配 train → val → test
-                                   # true: 先随机打乱分组顺序，再按比例分配
+                                   # holdout:
+                                   #   false: 按维度原始顺序依次分配 train → val → test
+                                   #   true: 先随机打乱分组顺序，再按比例分配
+                                   # k-fold:
+                                   #   false: 按维度原始顺序轮换，fold i 的 test = groups[i]
+                                   #   true: 先随机打乱分组顺序后再按上述规则轮换
+                                   # dimension=dataset 时（见 2.2）:
+                                   #   holdout 为显式 assign（shuffle 无效）
+                                   #   k-fold: false 按 datasets 声明顺序轮换（fold i 的 test = aliases[i]）,
+                                   #           true 先打乱 alias 顺序后再轮换
                                    # 注：dimension=flatten 时 shuffle 必须为 true（R26）
 seed: 42                           # 随机种子（可省略，继承全局 seed）
 
@@ -56,7 +64,8 @@ val_split:
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
 val_ratio: 0.2                             # 从全域数据中切出的验证集比例
 shuffle: true                              # 是否打乱分组顺序（默认 true，见 R27）
-                                           # false: 按维度原始顺序，尾部组划入 val
+                                           # false: 按维度原始顺序依次分配 train → val
+                                           #        （前部组为 train，尾部 val_ratio 比例的组为 val）
                                            # true: 先随机打乱分组顺序，再按比例切出 val
                                            # 注：dimension=flatten 时 shuffle 必须为 true（R26）
 ```
@@ -71,12 +80,16 @@ shuffle: true                              # 是否打乱分组顺序（默认 t
 strategy: holdout | k-fold
 dimension: dataset | subject | session
 shuffle: true                      # 是否打乱分组顺序（默认 true，见 R27）
-                                   # dimension=subject/session 时生效：
+                                   # dimension=subject/session + holdout:
                                    #   false: 按维度原始顺序，前部组划入 source，尾部组划入 target
                                    #   true: 先随机打乱分组顺序，再按比例分配
-                                   # dimension=dataset 时：
-                                   #   holdout 为显式指派（shuffle 无效）
-                                   #   k-fold 控制轮换顺序
+                                   # dimension=subject/session + k-fold:
+                                   #   false: 按维度原始顺序轮换，fold i 的 target = groups[i]
+                                   #   true: 先随机打乱分组顺序后再按上述规则轮换
+                                   # dimension=dataset + holdout: 显式指派（shuffle 无效）
+                                   # dimension=dataset + k-fold:
+                                   #   false: 按 datasets 声明顺序轮换，fold i 的 target = aliases[i]
+                                   #   true: 先随机打乱 alias 顺序后再按上述规则轮换
 # holdout + dataset: 显式指定 source/target
 # holdout + subject/session: target_count 或 target_ratio（二者互斥）
 # k-fold: k（-1 = leave-one-out）

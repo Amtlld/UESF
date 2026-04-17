@@ -407,7 +407,8 @@ class KFoldSplitter:
                len(get_groups(data, dimension))；若解析后折数仍为 1 或超过
                组数，抛出 SplitError。
             val_ratio: 无 val_split 时，从整体数据中切出验证集的比例。
-                       内部自动换算为 val_ratio_in_train = val_ratio / (1 - 1/k)。
+                       内部自动换算为 val_ratio_in_train = val_ratio / (1 - 1/k)，
+                       每折从 train 部分按**主 dimension** 分组切出 val（与 test 同维度）。
                        有 val_split 时必须为 0。
             val_split_config: 验证集独立划分配置（含 dimension, val_ratio, shuffle）。
                               与主 val_ratio 互斥。
