@@ -98,11 +98,26 @@ trainers:
 uesf experiment add --name baseline_exp
 ```
 
-编辑 `experiments/baseline_exp.yml`：
+编辑 `experiments/baseline_exp.yml`（dev6 格式，顶层 `split`，自动通道接线，无 `dataloaders` 块）：
 
 ```yaml
-name: baseline_exp
+experiment_name: baseline_exp
 seed: 42
+
+datasets:
+  main:
+    name: my_preprocessed
+    transforms:
+      - name: zscore_normalize
+        scope: per_dataset   # per_dataset (默认) | global
+
+# 顶层 split: subject / session / recording / flatten / dataset 五选一
+split:
+  strategy: k-fold
+  dimension: subject
+  k: 5
+  val_ratio: 0.1            # 从整体切出 10% 验证；框架内部换算为折内比例
+  shuffle: true
 
 model:
   name: my_cnn
@@ -112,26 +127,6 @@ trainer:
   name: my_trainer
   params: {}
 
-datasets:
-  main:
-    name: my_preprocessed
-    split:
-      strategy: k-fold
-      dimension: subject
-      k-folds: 5
-    transforms:
-      - name: zscore_normalize
-        fit_on: train
-        apply_to: all
-
-dataloaders:
-  train:
-    main: "main.train"
-  val:
-    main: "main.val"
-  test:
-    main: "main.test"
-
 training:
   epochs: 100
   batch_size: 64
@@ -139,20 +134,46 @@ training:
     name: adam
     params: { lr: 0.001 }
   early_stopping:
-    monitor: val_accuracy
+    metric: val_accuracy
     patience: 10
     mode: max
+  checkpoint:
+    metric: val_accuracy
+    mode: max
+  logging:                   # 可选，安装 uesf[tensorboard] 后可用
+    backend: tensorboard
+    log_every_n_epochs: 1
 
 evaluation:
   metrics: [accuracy, f1_score, auroc]
   k_fold_aggregation: concat
+```
 
-logging:
-  checkpoint_metric: val_accuracy
+UDA 示例（mode 切换到 `uda`，其余按 dev6 语义填写 `uda.domain` / `source` / `target`）：
+
+```yaml
+mode: uda
+uda:
+  domain:
+    strategy: k-fold
+    dimension: subject
+    k: -1                    # leave-one-subject-out
+  adaptation: inductive
+  source:
+    split:
+      dimension: recording
+      val_ratio: 0.2
+  target:
+    split:
+      strategy: holdout
+      dimension: recording
+      train_ratio: 0.7
+      test_ratio: 0.3
 ```
 
 ```bash
 uesf experiment run --exp baseline_exp
+tensorboard --logdir experiments/results/baseline_exp   # 查看多 fold 训练曲线
 ```
 
 ### 6. 查询结果
