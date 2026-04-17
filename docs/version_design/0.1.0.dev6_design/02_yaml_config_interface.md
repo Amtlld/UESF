@@ -12,9 +12,10 @@
 strategy: holdout | k-fold        # 划分策略
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
          # Regular 模式顶层 split 额外支持 dataset（见 2.2）
-shuffle: true                      # 是否打乱划分维度上的分组顺序（默认 true）
+shuffle: true                      # 是否打乱划分维度上的分组顺序（默认 true，见 R27）
                                    # false: 按维度原始顺序依次分配 train → val → test
                                    # true: 先随机打乱分组顺序，再按比例分配
+                                   # 注：dimension=flatten 时 shuffle 必须为 true（R26）
 seed: 42                           # 随机种子（可省略，继承全局 seed）
 
 # holdout 专有（无 val_split 时三路切分）
@@ -54,9 +55,10 @@ val_split:
 ```yaml
 dimension: subject | session | recording | flatten  # 划分维度（隔离单位）
 val_ratio: 0.2                             # 从全域数据中切出的验证集比例
-shuffle: true                              # 是否打乱分组顺序（默认 true）
+shuffle: true                              # 是否打乱分组顺序（默认 true，见 R27）
                                            # false: 按维度原始顺序，尾部组划入 val
                                            # true: 先随机打乱分组顺序，再按比例切出 val
+                                           # 注：dimension=flatten 时 shuffle 必须为 true（R26）
 ```
 
 > **dimension 生效**：ValSplit 也按 dimension 分组后再切分。例如 `dimension: session` 时，先按 session 分组，再按 val_ratio 将部分 session 组整体划入验证集，确保同一 session 的数据不会跨 train/val 泄漏。`dimension: flatten` 时，将 (subject, session, recording) 展平为独立单元后随机切分，不做维度隔离。
@@ -68,7 +70,7 @@ shuffle: true                              # 是否打乱分组顺序（默认 t
 ```yaml
 strategy: holdout | k-fold
 dimension: dataset | subject | session
-shuffle: true                      # 是否打乱分组顺序（默认 true）
+shuffle: true                      # 是否打乱分组顺序（默认 true，见 R27）
                                    # dimension=subject/session 时生效：
                                    #   false: 按维度原始顺序，前部组划入 source，尾部组划入 target
                                    #   true: 先随机打乱分组顺序，再按比例分配
@@ -82,7 +84,7 @@ shuffle: true                      # 是否打乱分组顺序（默认 true）
 
 > **设计说明**：`dataset` 维度在 UDA 模式中仅出现在 DomainPartition 中，不出现在 UDA 的 `source.split`（ValSplit）和 `target.split`（Split Block）中。在 Regular 模式中，顶层 `split` 额外支持 `dimension: dataset`（见 2.2），此时由 `DatasetLevelSplitter` 处理，走独立的跨数据集执行路径。
 >
-> **不支持 `recording` 维度**：DomainPartition 当前不支持 `dimension: recording`。Recording 通常是同一 subject 同一 session 内的重复采集，跨 recording 的域偏移较小，UDA 意义有限。如有需求，后续版本可扩展。
+> **维度白名单（R28）**：DomainPartition 当前仅支持 `dataset | subject | session`，不支持 `recording` 与 `flatten`。Recording 通常是同一 subject/session 内的重复采集，跨 recording 的域偏移有限；flatten 展平后不再保留域隔离语义，与域划分冲突。如有需求，后续版本再扩展。
 
 ---
 
@@ -247,7 +249,7 @@ uda:
 ```
 
 > **关键约束**：
-> - `source` 块整体可选。省略时源域全量数据作为训练集，`source_val` 为空数组，不构建 source_val dataloader
+> - `source` 块整体可选。省略时源域全量数据作为训练集，`source_val` 为空数组，不构建 source_val dataloader。需要源域验证集时显式配置 `source.split`（见场景 A/B）；仅目标域需要验证集时可完全省略 `source` 块
 > - `source.split` 使用 **ValSplit** 结构：仅 `dimension + val_ratio + shuffle`，不含 `strategy`、`train_ratio`、`test_ratio`（源域永远不做测试）
 > - `transductive` 模式下，`target.split` **不可出现**。目标域全量数据同时用于无监督训练和测试。当前版本不支持 transductive 下的 checkpoint/早停逻辑
 > - `inductive` 模式下，`target.split` 使用完整 **Split Block** 结构（必须包含 `test_ratio` 或 `k`），验证集配置（`val_ratio` 或 `val_split`）可选——省略时目标域仅 train/test 二路切分，`target_val` 为空数组。Checkpoint 选择和早停基于目标域验证集上的指标（无验证集时不可配置 checkpoint/早停）
@@ -404,14 +406,15 @@ datasets:                         # 必填，至少一个
     transforms:                   # 可选，后处理变换
       - name: zscore_normalize
         scope: per_dataset | global  # 可选，默认 per_dataset
-                                     # per_dataset: 各数据集内独立标准化。fit 仅在该数据集内可用的训练数据上进行：
-                                     #   - 数据集内切分（dimension=subject/session/recording/flatten）：fit on 该数据集的 train 部分，transform on train/val/test
-                                     #   - 跨数据集（dimension=dataset）：训练数据集 fit on 去掉 val 后的训练部分（有 val_split 时）或全量（无 val_split 时），
-                                     #     transform on 该数据集的 train/val 部分；测试数据集 fit on 自身全量数据，transform on 自身全量数据。
-                                     #     各数据集使用各自的统计量，互不影响。
-                                     #     注：测试数据集 fit on 自身是 per_dataset 语义下的必然行为——该数据集整体作为测试集，
-                                     #     不存在训练部分可用于 fit。若希望使用训练集统计量 transform 测试集，应使用 scope: global
-                                     # global: 所有数据集的训练集合并后 fit，统一 transform 全部数据（仅 Regular 模式可用）
+                                     # per_dataset: 各数据集内独立标准化，各数据集使用各自的统计量，互不影响。
+                                     #   - 数据集内切分（dimension=subject/session/recording/flatten）：
+                                     #     fit on 该数据集的 train 部分，transform on train/val/test
+                                     #   - 跨数据集（dimension=dataset）：
+                                     #     * 训练数据集：fit on train 部分（不含 val_split 切出的 val），transform on train + val
+                                     #     * 测试数据集：fit & transform on 自身全量数据
+                                     #     注：训练/测试数据集 fit 范围的非对称由角色决定——测试数据集不参与训练，
+                                     #     无训练部分可供 fit；若希望用训练数据统计量 transform 测试数据，应使用 scope: global
+                                     # global: 所有训练数据集的 train 部分合并 fit，统一 transform 全部数据（仅 Regular 模式可用）
 
 # ---- 跨数据集对齐（多数据集时） ----
 alignment:                        # 可选

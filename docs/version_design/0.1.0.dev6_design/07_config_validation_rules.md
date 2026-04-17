@@ -27,6 +27,9 @@
 | R23 | UDA 禁止 global scope | `mode=uda` 时，`transforms[].scope` 不可为 `"global"`（UDA 跨数据集场景下各数据集必须独立标准化） |
 | R24 | transductive 禁止 checkpoint/早停 | `adaptation=transductive` 时，`training.early_stopping` 和 `training.checkpoint` 不可出现（当前版本不支持 transductive 下的 checkpoint/早停逻辑） |
 | R25 | 多数据集需 dataset 维度 | `mode=regular` 且 `len(datasets) > 1` → `split.dimension` 必须为 `dataset`。多数据集场景下各数据集的 subject/session/recording 结构可能不同，无法在非 dataset 维度上统一分组。同理 `mode=uda` 且 `len(datasets) > 1` → `domain.dimension` 必须为 `dataset` |
+| R26 | flatten 维度禁止 shuffle=False | 任意划分原语（Split Block / ValSplit / val_split 子块）中 `dimension=flatten` 时，`shuffle` 必须为 `true`。flatten 语义为"将 (subject, session, recording) 展平后随机切分"，顺序遍历无明确物理意义，抛出 `TypeMismatchError` |
+| R27 | shuffle 默认值 | 所有划分原语（Split Block / ValSplit / DomainPartition）中 `shuffle` 字段未显式指定时，默认为 `true`。由 `ConfigValidator.normalize()` 填充 |
+| R28 | DomainPartition 维度白名单 | `uda.domain.dimension` 仅允许 `dataset | subject | session`。当前版本不支持 `recording`（跨 recording 域偏移小，UDA 意义有限）和 `flatten`（与域划分的隔离语义冲突）。其他值抛出 `TypeMismatchError` |
 
 ---
 

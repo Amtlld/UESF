@@ -160,14 +160,17 @@ class RegularExecutionStrategy:
     scope=per_dataset（默认）：
       调用 apply_transforms_per_dataset()
       - 对每个数据集独立创建 transform 实例
-      - transform.fit(该数据集的 train 部分)
-      - transform.transform(该数据集的 train/val/test 部分)
+      - 单数据集 / 数据集内切分（dimension=subject/session/recording/flatten）：
+        fit on train 部分，transform on train/val/test
+      - 跨数据集（dimension=dataset）：
+        * 训练数据集：fit on train（不含 val_split 切出的 val），transform on train + val
+        * 测试数据集：fit & transform on 自身全量数据
       单数据集时等价于 scope=global。
     
     scope=global：
       调用 apply_transforms_global()
       - 创建单个 transform 实例
-      - transform.fit(所有数据集的 train 合并数据)
+      - transform.fit(所有训练数据集的 train 合并数据)
       - transform.transform(所有 train/val/test 数据)
     """
     
