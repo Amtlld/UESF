@@ -246,7 +246,7 @@ class ConfigValidator:
         处理内容：
         - seed 默认 42
         - mode 默认 "regular"
-        - shuffle 默认 true
+        - shuffle 默认 true（R27；Split Block / ValSplit / val_split 子块 / DomainPartition 统一填充）
         - 旧键名转换（k-folds / k_folds → k）
         - k-fold 无 val_split 时 val_ratio → val_ratio_in_train 换算
         - val_split 存在时提取为 val_split_config
@@ -258,7 +258,11 @@ class ConfigValidator:
     def validate(config: dict) -> None:
         """校验规范化后的配置，不合法则抛出 ConfigError。
         
-        校验规则见配置校验规则文档。
+        校验规则见配置校验规则文档（R1–R28）。重点包括：
+        - R26：dimension=flatten 时 shuffle 必须为 true（全部划分原语）
+        - R28：uda.domain.dimension 仅允许 dataset|subject|session
+        - R6/R15/R21：各类 ratio 值域与求和约束
+        - R11：domain.dimension ≠ source/target.split.dimension
         """
         ...
 ```
@@ -399,6 +403,9 @@ class KFoldSplitter:
                  shuffle: bool = False, seed: int = 42):
         """
         Args:
+            k: 折数。k == -1 表示 leave-one-out，运行时在 split() 中解析为
+               len(get_groups(data, dimension))；若解析后折数仍为 1 或超过
+               组数，抛出 SplitError。
             val_ratio: 无 val_split 时，从整体数据中切出验证集的比例。
                        内部自动换算为 val_ratio_in_train = val_ratio / (1 - 1/k)。
                        有 val_split 时必须为 0。
@@ -423,13 +430,21 @@ class DatasetLevelSplitter:
     """
     
     def __init__(self, strategy: str, assign: dict | None = None,
-                 k: int | None = None, seed: int = 42):
+                 k: int | None = None, shuffle: bool = True, seed: int = 42):
+        """
+        Args:
+            shuffle: strategy=k-fold 时控制 alias 轮换顺序（shuffle=False 按
+                     datasets 声明顺序，shuffle=True 按 seed 打乱后轮换）。
+                     strategy=holdout 时 shuffle 无效（assign 为显式指派）。
+        """
         ...
     
     def split(self, aliases: list[str]) -> list[DatasetLevelSplitResult]:
         """
         strategy=holdout + assign: 返回长度为 1 的列表
-        strategy=k-fold: 返回长度为 k 的列表（各数据集轮流做测试集）
+        strategy=k-fold: 返回长度为 k 的列表（各数据集轮流做测试集）；
+                        k == -1 在 split() 中解析为 len(aliases)；
+                        非 -1 时要求 k == len(aliases)（R14）
         
         注意：DatasetLevelSplitResult 仅包含 alias 级划分（train/test）。
         验证集划分由 RegularExecutionStrategy 在合并训练数据后，
@@ -710,9 +725,12 @@ def apply_transforms_per_dataset(
     
     流程：
     1. 对每个 alias 独立创建 transform 实例
-    2. flatten_3d(dataset_cache[alias]) → 3D 数据
-    3. 用 split_indices[alias][fit_phase] 索引取出训练数据 → transform.fit()
-    4. 对 flatten_3d 后的全量数据执行 transform.transform()
+    2. flatten_3d(dataset_cache[alias]) → 3D 数据（该 alias 的所有样本）
+    3. 用 split_indices[alias][fit_phase] 索引取出 fit 数据 → transform.fit()
+    4. 对该 alias 的所有样本执行 transform.transform()
+       （alias 内的样本天然只属于该数据集参与的 phase——
+        训练数据集：train + val；测试数据集：test。因此"全量 transform"
+        等价于"transform 该数据集参与的所有 phase"，不会触及不属于该数据集的数据）
     5. reshape 回 5D 写回 dataset_cache[alias]
     
     特殊情况（dimension=dataset 的测试数据集）：

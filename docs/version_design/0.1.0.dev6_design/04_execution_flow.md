@@ -65,11 +65,13 @@ load datasets → alignment
 
 > **Transform fit 策略（Regular 模式）**：
 > 通过 `apply_transforms_per_dataset()` 或 `apply_transforms_global()` 函数执行：
-> - `scope: per_dataset`（默认）：调用 `apply_transforms_per_dataset()`。各数据集独立标准化，fit 仅在该数据集内可用的训练数据上进行：
->   - **数据集内切分**（路径 A）：fit on 该数据集的 train 部分，transform on 该数据集的 train/val/test 部分。
->   - **跨数据集**（路径 B）：训练数据集 fit on 去掉 val 后的训练部分（有 `val_split` 时）或全量（无 `val_split` 时），transform on 该数据集的 train/val 部分；测试数据集 fit on 自身全量数据（无训练部分可用），transform on 自身全量数据。各数据集使用各自的统计量，互不影响。
-> - `scope: global`：调用 `apply_transforms_global()`。所有数据集的训练数据合并后 fit，统一 transform 到所有 train/val/test 数据。仅 Regular 模式可用。
-> - 无论何种 scope，验证集和测试集均不参与 fit（跨数据集场景下测试数据集 fit on 自身全量属于特殊情况：该数据集整体为 test，无训练部分可用），以避免数据泄漏。
+> - `scope: per_dataset`（默认）：调用 `apply_transforms_per_dataset()`。各数据集独立标准化，使用各自统计量：
+>   - **数据集内切分**（路径 A）：fit on 该数据集的 train 部分，transform on 该数据集的 train/val/test。
+>   - **跨数据集**（路径 B）：
+>     - 训练数据集：fit on train（不含 `val_split` 切出的 val），transform on train + val。
+>     - 测试数据集：fit & transform on 自身全量数据（该数据集整体作为 test，无训练部分可用）。
+> - `scope: global`：调用 `apply_transforms_global()`。所有训练数据集的 train 合并 fit，统一 transform 到所有 train/val/test 数据。仅 Regular 模式可用。
+> - 验证集不参与 fit；跨数据集下测试数据集 fit on 自身为角色决定的必然行为（若希望使用训练统计量 transform 测试集，应使用 `scope: global`）。
 
 **自动通道映射规则（Regular 模式）**：
 - 单数据集：channel name = `"main"`
