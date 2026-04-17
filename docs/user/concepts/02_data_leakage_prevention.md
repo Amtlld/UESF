@@ -33,9 +33,9 @@ UESF 的 Splitter 支持按数据的特定维度进行隔离切分，确保同�
 | 配置值 | 切分粒度 | 保证 |
 |--------|----------|------|
 | `subject` | 按被试切分 | 同一被试的所有 Epoch 只在训练集或测试集中出现 |
-| `session` | 按会话切分 | 同一被试同一会话的数据不跨集合 |
-| `recording` | 按录制段切分 | 同一录制段的 Epoch 不跨集合 |
-| `none` | 按样本随机切分 | 无隔离保证，研究被试内泛化时使用 |
+| `session` | 按会话切分 | 同一 (被试, 会话) 的数据不跨集合 |
+| `recording` | 按录制段切分 | 每个 recording 作为独立组 |
+| `flatten` | 将 (subject, session, recording) 三元组展平后随机切分 | 无维度隔离，适用于研究被试内泛化（shuffle 必须为 true，R26） |
 
 ### 正确配置（跨被试泛化）
 
@@ -43,10 +43,11 @@ UESF 的 Splitter 支持按数据的特定维度进行隔离切分，确保同�
 datasets:
   main:
     name: seed_preprocessed
-    split:
-      strategy: k-fold
-      dimension: subject    # 按被试隔离
-      k-folds: 5
+
+split:
+  strategy: k-fold
+  dimension: subject        # 按被试隔离
+  k: 5
 ```
 
 5-Fold 时，14 名被试会被分为 5 组，每次用 4 组（约 11 名被试）训练，1 组（约 3 名被试）测试。同一被试的所有 Epoch **绝对不会**跨越训练集和测试集。
@@ -57,15 +58,17 @@ datasets:
 datasets:
   main:
     name: seed_preprocessed
-    split:
-      strategy: holdout
-      dimension: none       # 按样本随机切分，存在泄露
-      train_ratio: 0.8
-      val_ratio: 0.1
-      test_ratio: 0.1
+
+split:
+  strategy: holdout
+  dimension: flatten        # 展平后随机切分，无维度隔离
+  shuffle: true             # flatten 必须配合 shuffle=true（R26）
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
 ```
 
-`dimension: none` 允许同一被试的 Epoch 同时出现在训练集和测试集。除非你的研究问题明确是被试内泛化（即模型只需要在同一被试的不同时段泛化），否则不应使用此设置。
+`dimension: flatten` 将 (subject, session, recording) 展平为独立单元后随机切分，同一被试的 Epoch 可能同时出现在训练集和测试集。除非你的研究问题明确是被试内泛化（即模型只需要在同一被试的不同时段泛化），否则不应使用此设置。
 
 ---
 
@@ -87,14 +90,14 @@ UESF 严格执行以下顺序：
 datasets:
   main:
     name: seed_preprocessed
-    split:
-      strategy: k-fold
-      dimension: subject
-      k-folds: 5
     transforms:
       - name: zscore_normalize
-        fit_on: train      # 只从训练集计算均值(μ)和标准差(σ)
-        apply_to: all      # 用同一组μ/σ变换 train/val/test
+        scope: per_dataset   # 该数据集内 fit on train 部分，transform 所有相
+
+split:
+  strategy: k-fold
+  dimension: subject
+  k: 5
 ```
 
 ### 为什么不在预处理阶段做全局标准化？
@@ -144,24 +147,27 @@ UDA（无监督域自适应）实验引入了源域/目标域的划分，带来�
 
 ### 源域/目标域隔离
 
-数据集内 UDA（`type: intra-dataset`）按 `dimension`（subject 或 session）将数据分为源域和目标域，保证同一被试/会话的数据不会同时出现在源域和目标域。
+数据集内 UDA（`uda.domain.dimension: subject|session`）按维度将数据分为源域和目标域，保证同一被试/会话的数据不会同时出现在源域和目标域。
 
 ```yaml
+mode: uda
+
 uda:
-  type: intra-dataset
-  dimension: subject    # 按被试隔离源域和目标域
-  strategy: k-fold
-  k-folds: -1           # 每个被试轮流做目标域
+  domain:
+    strategy: k-fold
+    dimension: subject    # 按被试隔离源域和目标域
+    k: -1                 # 每个被试轮流做目标域
+  adaptation: transductive
 ```
 
-### Fit-on-Source 变换
+### 源域 / 目标域独立 fit
 
-UDA 模式下，在线变换（Z-Score 等）的 `fit()` **仅在源域训练数据上执行**，然后 `transform()` 统一应用到源域和目标域的所有子集。这确保目标域的统计信息不会通过变换参数泄露给模型。
+UDA 模式下 transforms 必须 `scope: per_dataset`（R23）。源域在自身 `source_train` 上 fit（transform source_train/source_val），目标域在自身 `target_train` 上 fit（inductive：transform target_train/val/test；transductive：fit on 目标域全量数据并 transform 同一份）。两套独立统计量共存，目标域信息不会通过变换参数泄露给源域模型。
 
 ### Transductive vs Inductive
 
 - **Transductive**：目标域的全部数据同时用于无监督训练和最终评估。这是 UDA 文献中的标准设定，不存在目标域的 train/test 泄露问题，因为目标域标签在训练中不被使用。
-- **Inductive**：目标域被进一步划分为训练集和测试集。`target_split` 配置控制划分方式，确保目标域的测试数据在训练过程中完全不可见。
+- **Inductive**：目标域被进一步划分为训练集和测试集。`uda.target.split` 配置控制划分方式，确保目标域的测试数据在训练过程中完全不可见。
 
 ---
 
@@ -170,12 +176,14 @@ UDA 模式下，在线变换（Z-Score 等）的 `fit()` **仅在源域训练数
 在提交实验结果前，检查以下配置：
 
 **常规实验：**
-- [ ] `split.dimension` 设置为 `subject`（或你研究问题对应的正确维度，而非 `none`）
+- [ ] `split.dimension` 设置为 `subject`（或你研究问题对应的正确维度，而非 `flatten`）
 - [ ] 全局 Z-Score 标准化配置在 `transforms` 中，而非在 `preprocess.yml` 的 `data` 流中
-- [ ] `transforms.fit_on` 设置为 `train`
+- [ ] `transforms.scope` 明确为 `per_dataset` 或 `global`；跨数据集场景下 `per_dataset` 会按角色决定 fit 范围
 - [ ] 实验配置了 `seed` 确保可复现性
 
 **UDA 实验（额外检查）：**
-- [ ] `uda.dimension` 设置正确（`subject` 或 `session`）
+- [ ] `uda.domain.dimension` 设置正确（`subject` / `session` / `dataset`）
+- [ ] `uda.source.split.dimension` 与 `uda.target.split.dimension` 都 ≠ `domain.dimension`（R11）
 - [ ] 跨数据集 UDA 已配置 `alignment`（通道和标签对齐）
+- [ ] `adaptation: transductive` 时 **不要** 配置 `training.checkpoint` 或 `training.early_stopping`（R24）
 - [ ] Trainer 的 `training_step` 不使用 `batch["target"]` 的标签进行有监督训练

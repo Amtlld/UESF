@@ -58,17 +58,18 @@ data:
 
 | 变换名 | 说明 | 参数 | 说明 |
 |--------|------|------|------|
-| `zscore_normalize` | 全局 Z-Score 标准化 | `fit_on: str` | 用于拟合参数的集合：`train` |
-| | | `apply_to: str` | 应用范围：`all`（train/val/test 全部） |
+| `zscore_normalize` | Z-Score 标准化 | `scope: str` | `per_dataset`（默认，每数据集独立 fit-on-train）或 `global`（所有训练数据集合并 fit，仅 Regular 模式；UDA 下 R23 禁止） |
+| | | `params.eps: float` | 除零保护，默认 `1e-8` |
 
 **示例**：
 
 ```yaml
 transforms:
   - name: zscore_normalize
-    fit_on: train
-    apply_to: all
+    scope: per_dataset
 ```
+
+> 单数据集场景下 `per_dataset` 与 `global` 行为等价；跨数据集（`split.dimension: dataset`）下 `per_dataset` 的训练数据集 fit on train，测试数据集 fit on 自身全量。`global` 将所有训练数据集的 train 合并 fit 后 transform 全体。
 
 ---
 

@@ -10,10 +10,27 @@ UESF 支持两大类实验模式：**常规深度学习**（`mode: regular`，�
 
 ```yaml
 # ==================== 基础元信息 ====================
-name: baseline_cnn
+experiment_name: baseline_cnn
 description: "1D CNN 跨被试情绪识别，5-Fold 交叉验证"
 seed: 42
 # mode: regular  # 可省略，默认 regular
+
+# ==================== 数据集 ====================
+datasets:
+  main:
+    name: seed_preprocessed
+    transforms:
+      - name: zscore_normalize
+        scope: per_dataset        # per_dataset (默认) | global
+
+# ==================== 切分 ====================
+# 顶层 split：整个实验只有一份切分配置，框架自动接线 dataloaders
+split:
+  strategy: k-fold
+  dimension: subject              # subject | session | recording | flatten | dataset
+  k: 5
+  val_ratio: 0.1                  # 从整体切出 10%，框架内部按折换算
+  shuffle: true
 
 # ==================== 组件挂载 ====================
 model:
@@ -23,30 +40,6 @@ model:
 trainer:
   name: emotion_trainer
   params: {}
-
-# ==================== 数据集与切分 ====================
-datasets:
-  main:
-    name: seed_preprocessed
-    split:
-      strategy: k-fold
-      dimension: subject
-      k-folds: 5
-      val_ratio_in_train: 0.1
-      shuffle: true
-    transforms:
-      - name: zscore_normalize
-        fit_on: train
-        apply_to: all
-
-# ==================== DataLoader 通道映射 ====================
-dataloaders:
-  train:
-    main: "main.train"
-  val:
-    main: "main.val"
-  test:
-    main: "main.test"
 
 # ==================== 训练超参数 ====================
 training:
@@ -61,19 +54,21 @@ training:
   gradient_clip:
     max_norm: 1.0
   early_stopping:
-    monitor: val_accuracy
+    metric: val_accuracy
     patience: 15
     mode: max
+  checkpoint:
+    metric: val_accuracy
+    mode: max                     # 可省略，默认 max
+  logging:                        # 可选；启用需安装 uesf[tensorboard]
+    backend: tensorboard
+    log_every_n_epochs: 1
+    log_graph: false
 
 # ==================== 评估配置 ====================
 evaluation:
   metrics: [accuracy, f1_score, auroc]
-  k_fold_aggregation: concat
-
-# ==================== 日志配置 ====================
-logging:
-  use_wandb: false
-  checkpoint_metric: val_accuracy
+  k_fold_aggregation: concat      # concat | mean_std
 ```
 
 ---
@@ -81,12 +76,12 @@ logging:
 ## 基础元信息
 
 ```yaml
-name: baseline_cnn          # 实验名称，与文件名一致
-description: "实验描述"      # 可选，用于 experiment list 显示
-seed: 42                    # 随机种子
+experiment_name: baseline_cnn     # 实验名称，与文件名一致
+description: "实验描述"            # 可选，用于 experiment list 显示
+seed: 42                          # 随机种子
 ```
 
-`seed` 控制数据切分的随机性，相同 seed 保证每次实验的切分方式完全一致，是实验可复现性的基础。
+`seed` 控制数据切分的随机性，相同 seed 保证每次实验的切分方式完全一致，是实验可复现性的基础。框架为多层切分派生独立种子（domain=+0、source=+1、target=+2），不同层随机性互不影响。
 
 ---
 
@@ -94,56 +89,67 @@ seed: 42                    # 随机种子
 
 ```yaml
 model:
-  name: emotion_cnn         # 对应 project.yml 中 models 块的键名
+  name: emotion_cnn               # 对应 project.yml 中 models 块的键名
   params:
-    hidden_size: 128        # 传入模型 __init__ 的 **kwargs
+    hidden_size: 128              # 传入模型 __init__ 的 **kwargs
     dropout_rate: 0.5
 
 trainer:
-  name: emotion_trainer     # 对应 project.yml 中 trainers 块的键名
-  params: {}                # 传入训练器 __init__ 的 **kwargs（通常为空）
+  name: emotion_trainer           # 对应 project.yml 中 trainers 块的键名
+  params: {}                      # 传入训练器 __init__ 的 **kwargs（通常为空）
 ```
 
-框架在运行时按三级优先级解析组件名：项目级（`project.yml`）> 全局库（`uesf model list`）> 内置（如 `dummy`）。
+框架在运行时按三级优先级解析组件名：项目级（`project.yml`）> 全局库（`uesf model list`）> 内置（如 `dummy_model` / `dummy_trainer`）。
 
 ---
 
-## 数据集定义与切分策略
+## 数据集定义
 
-### 数据集别名
-
-`datasets` 下的每个键是这次实验中给数据集起的**临时别名**（如 `main`），用于在 `dataloaders` 中引用。同一实验可以挂载多个数据集（多源域场景）。
-
-### 切分策略（strategy）
-
-**Holdout 切分**：将数据一次性分为训练/验证/测试集。
+`datasets` 下的每个键是这次实验中给数据集起的**临时别名**（如 `main`）。同一实验可以挂载多个数据集（跨数据集训练或 UDA）。dev6 不再需要 `dataloaders` 显式接线 —— 框架根据 `mode` 与 `split` 自动决定通道名，见下文 "自动通道接线"。
 
 ```yaml
 datasets:
   main:
-    name: seed_preprocessed
-    split:
-      strategy: holdout
-      dimension: subject
-      shuffle: true
-      train_ratio: 0.70
-      val_ratio: 0.15
-      test_ratio: 0.15
+    name: seed_preprocessed       # 预处理数据集名
+    # transforms: ...             # 可选，见"在线变换"
 ```
 
-**K-Fold 交叉验证**：将数据切为 K 折，循环使用每一折作为测试集。
+---
+
+## 切分（split）
+
+**顶层 `split` 在常规模式下必填**。三种划分原语各司其职：
+
+- **Split Block**（完整 train/val/test）—— 用于顶层 `split` 与 UDA inductive 的 `target.split`
+- **ValSplit Block**（仅 train/val，切出验证集）—— 用于独立的 `val_split` 子块与 UDA 的 `source.split`
+- **DomainPartition**（source/target 域划分）—— 用于 UDA 的 `uda.domain`
+
+### 策略（strategy）
+
+**Holdout**：一次性切出 train/val/test。
 
 ```yaml
-datasets:
-  main:
-    name: seed_preprocessed
-    split:
-      strategy: k-fold
-      dimension: subject
-      k-folds: 5             # K 值；填 -1 或 "total" 表示留一法（LOOCV）
-      val_ratio_in_train: 0.1 # 每折内从训练集划出多少比例用于早停验证
-      shuffle: true
+split:
+  strategy: holdout
+  dimension: subject
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  shuffle: true
 ```
+
+**K-Fold 交叉验证**：切为 K 折，每折轮流做测试集。`k: -1` 表示留一法（LOOCV，即 k = 切分维度上的组数）。
+
+```yaml
+split:
+  strategy: k-fold
+  dimension: subject
+  k: 5
+  val_ratio: 0.1                  # 框架内部按 0.1 / (1 - 1/5) = 0.125 换算到每折训练部分
+  shuffle: true
+```
+
+> **框架内部换算**：k-fold 时 `val_ratio` 表达的是"从整体数据中切出的验证集比例"。框架按 `val_ratio / (1 - 1/k)` 换算为每折训练部分中的比例，用户无感知。
 
 ### 切分维度（dimension）
 
@@ -152,74 +158,92 @@ datasets:
 | dimension | 含义 | 适用场景 |
 |-----------|------|----------|
 | `subject` | 按被试切分：同一被试的所有数据只归属于一个集合 | 跨被试泛化（最严格，推荐） |
-| `session` | 按会话切分：同一会话的数据不跨集合 | 跨时间泛化 |
-| `recording` | 按录制段切分 | 较宽松的切分 |
-| `none` | 按样本随机切分 | 研究被试内泛化能力（可能存在泄露） |
-| `dataset` | 按数据集切分：整个数据集作为一个组分配 | 跨数据集泛化（需多数据集配置） |
+| `session` | 按会话切分：同一 (被试, 会话) 内的 recording 整体分配 | 跨时间泛化 |
+| `recording` | 每个 recording 作为独立组 | 最细粒度的维度切分 |
+| `flatten` | 将 (subject, session, recording) 三元组展平后随机切分 | 研究被试内泛化（无隔离） |
+| `dataset` | 整个数据集作为一个组分配 | 跨数据集泛化（需 ≥2 个数据集） |
 
 > 使用 `dimension: subject` 可以确保同一被试的 EEG 数据不会同时出现在训练集和测试集，这是跨被试 EEG 研究中防止数据泄露的标准做法。详见[数据泄露防护机制](../concepts/02_data_leakage_prevention.md)。
+
+**R26 约束**：`dimension: flatten` 必须配合 `shuffle: true`（展平后无序遍历无物理意义，配置校验阶段直接拒绝）。
 
 ### shuffle
 
 ```yaml
-shuffle: true   # 切分前随机打乱（适用于大多数分类实验）
-shuffle: false  # 保持固有顺序（适用于按时序前后测对比）
+shuffle: true    # 打乱切分维度上的分组顺序（R27 默认值）
+shuffle: false   # holdout: 按维度原始顺序依次分配 train → val → test
+                 # k-fold:  按维度原始顺序轮换，fold i 的 test = groups[i]
+                 # dimension=flatten 时 shuffle 必须为 true
 ```
+
+### 验证集独立划分（val_split，可选）
+
+默认情况下，val 与 test 在同一 `dimension` 上按比例切出。如果想在**另一个维度**上切出 val（例如主切分按 subject、val 按 session），使用 `val_split` 子块：
+
+```yaml
+split:
+  strategy: k-fold
+  dimension: subject
+  k: 5
+  val_split:
+    dimension: session
+    val_ratio: 0.1
+    shuffle: true                 # 默认 true（R27）
+  shuffle: true
+```
+
+> **与主 `val_ratio` 互斥（R19）**：同一 Split Block 中 `val_split` 和 `val_ratio` 只能出现一个。`val_split` 存在时主划分只产生 train/test，ValSplitter 从每折的 train 中切出 val。
+>
+> **R30 偏序约束**：主 `dimension: flatten` 时，`val_split.dimension` 必须也为 `flatten`（flatten 切分后训练子集不再保持 5-D 结构，无法在其他维度上分组）。
+>
+> **R21 值域**：`val_split.val_ratio` 必须在 `(0, 1)` 内（val_split 出现时 val_ratio 必须 > 0，否则不应配置）。
 
 ---
 
 ## 在线变换（transforms）
 
-变换在切分完成后执行，绑定在数据集配置下：
+变换在切分完成后按"fit-on-train / apply-to-all"原则执行，避免测试集统计信息泄露。dev6 引入 `scope` 字段来描述变换的 **作用范围**：
 
 ```yaml
 datasets:
   main:
     name: seed_preprocessed
-    split: ...
     transforms:
-      - name: zscore_normalize    # 全局 Z-Score 标准化
-        fit_on: train             # 只从训练集计算均值和标准差
-        apply_to: all             # 用同一组参数变换 train/val/test
+      - name: zscore_normalize
+        scope: per_dataset        # 每数据集独立（默认）
+        # scope: global           # 所有训练数据集合并 fit（仅 Regular 模式）
 ```
 
-`fit_on: train` + `apply_to: all` 是 Fit-on-Train 原则的配置方式：标准化参数仅从训练集学习，然后统一应用到所有集合，确保验证集和测试集的统计信息对模型完全保密。
+### 两种 scope 的语义
+
+| scope | fit 范围 | 适用场景 |
+|-------|----------|----------|
+| `per_dataset`（默认） | **单数据集 / 数据集内切分**：fit on 该数据集的 train 部分<br>**跨数据集（dimension=dataset）**：训练数据集 fit on train；测试数据集 fit on 自身全量（无训练部分） | 大多数场景；单数据集实验下与 global 等价 |
+| `global` | 所有训练数据集合并 train 数据 → 单次 fit → 应用到所有数据 | 需要用训练数据集统计量来 transform 测试数据集 |
+
+**单数据集退化**：单数据集场景下，`per_dataset` 与 `global` 行为完全相同（合并集合只有一个参与者）。
+
+**UDA 约束（R23）**：`mode: uda` 时 `scope` 必须为 `per_dataset`，框架会为源域、目标域分别 fit 对应数据集的相应部分：
+
+- 源域各数据集：fit on source_train，transform source_train / source_val
+- 目标域（inductive）：fit on target_train，transform target_train / target_val / target_test
+- 目标域（transductive）：fit on 目标域全量数据，transform 同一份数据
+
+**跨数据集一致性（R29）**：多数据集场景下，各 alias 的 `transforms` 列表必须长度相同且对应位置的 `(name, scope)` 完全一致，否则 `ConfigValidator.validate()` 拒绝。
 
 ---
 
-## DataLoader 通道映射（dataloaders）
+## 自动通道接线
 
-```yaml
-dataloaders:
-  train:               # 训练阶段使用的 batch 来源
-    main: "main.train" # 格式：<数据集别名>.<切分相>
-  val:
-    main: "main.val"
-  test:
-    main: "main.test"
-```
+dev6 删除了原来的 `dataloaders` 段，框架根据 `mode` 与 `split.dimension` 自动生成 DataLoader 通道字典：
 
-通道名（如 `main`）对应 Trainer 接收到的 `batch` 字典中的键名：
+| mode | dimension | train 批次键 | val 批次键 | test 批次键 |
+|------|-----------|-------------|-----------|-----------|
+| regular | 单数据集任一维度 | `main` | `main` | `main` |
+| regular | `dataset` | `main`（训练数据集合并） | `main`（训练数据集合并） | `main`（测试数据集合并） |
+| uda | — | `source`, `target` | `source_val`, `target_val` | `main`（目标域测试） |
 
-```python
-# 对应上述配置，batch 结构为：
-batch = {
-    "main": (data_tensor, labels_tensor)
-}
-```
-
-**多数据源示例**（域自适应场景）：
-
-```yaml
-dataloaders:
-  train:
-    source: "source_domain.train"
-    target: "target_domain.train"
-  val:
-    target: "target_domain.val"
-  test:
-    target: "target_domain.test"
-```
+Trainer 接到的 `batch` 结构即为这些键的 `dict[str, (data, labels)]`。Regular 模式下 Trainer 通常只需 `batch["main"]`；UDA 模式下从 `batch["source"]` / `batch["target"]` 分别取有监督损失 / 域对齐项。
 
 ---
 
@@ -239,9 +263,8 @@ training:
 optimizer:
   name: adam        # 优化器名称（见内置组件列表）
   params:
-    lr: 0.001       # 学习率（必填）
-    weight_decay: 1e-4  # 权重衰减（可选）
-    # betas, eps 等 Adam 特有参数也可以在这里填写
+    lr: 0.001
+    weight_decay: 1e-4
 ```
 
 ### 学习率调度器（scheduler，可选）
@@ -250,8 +273,8 @@ optimizer:
 scheduler:
   name: cosine_annealing_lr
   params:
-    T_max: 50        # 余弦退火周期（epoch 数）
-    eta_min: 1e-6    # 最小学习率
+    T_max: 50
+    eta_min: 1e-6
 ```
 
 ### 梯度裁剪（gradient_clip，可选）
@@ -266,11 +289,33 @@ gradient_clip:
 
 ```yaml
 early_stopping:
-  monitor: val_accuracy  # 监控的指标名称
+  metric: val_accuracy   # 监控的指标名称
   patience: 15           # 指标连续多少轮不改善时停止
   min_delta: 0.001       # 视为改善的最小变化量（可选，默认 0.0）
-  mode: max              # "max" 表示越大越好，"min" 表示越小越好
+  mode: max              # "max" 越大越好；"min" 越小越好
 ```
+
+### 检查点（checkpoint，可选）
+
+```yaml
+checkpoint:
+  metric: val_accuracy   # 用于选择 best model 的指标名
+  mode: max              # 默认 max
+  # dir: ...             # 可选，默认 <output_dir>/fold_<i>/checkpoints
+```
+
+### 训练日志（logging，可选）
+
+```yaml
+logging:
+  backend: tensorboard         # 当前仅支持 tensorboard（R17）
+  log_every_n_epochs: 1        # 正整数（R18）
+  log_graph: false             # 是否记录模型计算图（默认 false）
+```
+
+> **依赖**：启用 `tensorboard` 后端需安装可选依赖 `uv pip install uesf[tensorboard]`。每个 fold 独立写入 `experiments/results/<exp>/fold_<i>/tb_logs/`，`tensorboard --logdir experiments/results/<exp>` 可一次查看所有 fold 曲线。
+
+> **R24 约束**：`adaptation: transductive` 下 `checkpoint` 与 `early_stopping` 都不可出现（当前版本不支持 transductive 的模型选择指标）。
 
 ---
 
@@ -286,258 +331,271 @@ evaluation:
 
 | 方式 | 行为 | 适用场景 |
 |------|------|----------|
-| `concat`（推荐） | 将所有折的预测和目标拼接后，一次性计算指标 | 各折样本量不均衡，或标签分布不平衡时 |
-| `mean_std` | 每折独立计算指标，最终输出均值和标准差 | 需要置信区间的传统论文写作 |
-
----
-
-## 日志配置（logging）
-
-```yaml
-logging:
-  use_wandb: false              # 是否接入 Weights & Biases
-  checkpoint_metric: val_accuracy  # 保存最优检查点的依据指标
-```
-
-`checkpoint_metric` 指定的指标越大越好时，框架会在该指标达到历史最优时保存检查点。
+| `concat`（推荐） | 将所有折的预测和目标拼接后，一次性计算指标 | 每个样本恰好被测试一次（标准 k-fold） |
+| `mean_std` | 每折独立计算指标，最终报告 mean ± std | 各折测试集重叠 / 规模不一致；或论文需要置信区间 |
 
 ---
 
 ## 按数据集维度切分（跨数据集常规 DL）
 
-当 `dimension: dataset` 时，多个数据集各自作为一个整体，分配到 train/val/test。配置方式有两种，显式指定优先。
+当 `dimension: dataset` 时，整个数据集作为一个组分配到 train/test。**dev6 要求显式 `assign`**（R13 覆盖所有声明的 aliases），且**验证集必须通过 `val_split` 配置**（R20 不允许主 `val_ratio`）。
 
-### 显式指定
+### Holdout + 显式 assign
 
 ```yaml
 datasets:
-  ds_a:
-    name: bci_iv_2a
-  ds_b:
-    name: bci_iv_2b
-  ds_c:
-    name: physionet_mi
-
-split:
-  dimension: dataset
-  train: [ds_a, ds_b]
-  test: [ds_c]
+  bcic4_2a:
+    name: BCIC4_2a_preprocessed
+  bcic4_2b:
+    name: BCIC4_2b_preprocessed
+  physionet:
+    name: PhysioNet_preprocessed
 
 alignment:
-  channels:
-    method: intersection
-  labels:
-    check_consistency: true
+  channel: intersection
+  label: true
+
+split:
+  strategy: holdout
+  dimension: dataset
+  assign:
+    train: [bcic4_2a, bcic4_2b]
+    test: [physionet]
+  val_split:
+    dimension: session
+    val_ratio: 0.1
+    shuffle: true
 ```
 
-### 比例划分
+框架对 `assign.train` 指定的每个训练数据集独立调用 ValSplitter —— 各数据集保持 5-D 结构，在自身维度空间内按 `val_split.dimension` 切出验证集，避免不同数据集的 subject/session/recording 命名空间混淆。
 
-未指定 `train` / `test` 列表时，使用比例自动分配：
+### K-Fold（各数据集轮流做测试集）
 
 ```yaml
 split:
+  strategy: k-fold
   dimension: dataset
-  train_ratio: 0.66
-  test_ratio: 0.34
-  shuffle: true
+  k: -1                        # leave-one-dataset-out；或 k == len(datasets)
+  val_split:
+    dimension: session
+    val_ratio: 0.1
+    shuffle: true
 ```
 
-> 使用 `dimension: dataset` 时，`split` 块位于与 `datasets` 同级的顶层位置，而非嵌套在每个数据集内。涉及多数据集时建议配置 `alignment`。
+> **R14 约束**：`dimension: dataset` + `k-fold` 时 `k` 必须为 `-1` 或等于数据集数量。
+>
+> **R3 约束**：`dimension: dataset` 需要 `len(datasets) ≥ 2`。
 
 ---
 
 ## 跨数据集对齐（alignment）
 
-当实验涉及多个数据集（无论是常规 DL 还是 UDA），需要确保通道和标签空间一致。`alignment` 块位于顶层。
-
-### 通道对齐
+多数据集实验需要对齐通道和标签空间。`alignment` 位于顶层：
 
 ```yaml
 alignment:
-  channels:
-    method: intersection    # 目前仅支持交集对齐
+  channel: intersection        # 通道对齐方式（目前仅支持 intersection）
+  label: true                  # 是否检查标签一致性，默认 true
 ```
 
-`intersection`：保留所有数据集**共有的通道**，丢弃各数据集独有的通道。对齐后通道顺序跟随第一个数据集的电极列表。
+**通道对齐**：`intersection` 保留所有数据集的通道交集，丢弃各自独有通道。对齐后通道顺序跟随第一个数据集的 `electrode_list`。前提是所有相关数据集在 `raw.yml` 中配置了 `electrode_list`；若交集为空，框架抛出 `ShapeMismatchError`。
 
-> 通道对齐要求所有相关数据集在 `raw.yml` 中配置了 `electrode_list`。如果交集为空（数据集无共同通道），框架会抛出明确错误。
+**标签对齐**：开启后验证所有数据集的 `n_classes` 与 `numeric_to_semantic` 映射一致。框架同时校验 `n_samples`（采样点数）一致，不一致抛 `ShapeMismatchError`；采样率不一致（`n_samples` 一致但 Hz 不同）发出 warning。
 
-### 标签对齐
-
-```yaml
-alignment:
-  labels:
-    check_consistency: true   # 默认为 true
-```
-
-开启后框架在实验开始前验证：
-- 所有数据集的**类别数**（`n_classes`）一致
-- **标签映射**（`numeric_to_semantic`）一致（例如 `{0: "left", 1: "right"}` 必须在所有数据集中相同）
-
-不一致时抛出 `ConfigError` 并给出修复提示。
+> **R16**：单数据集实验（`len(datasets) == 1`）时若配置 `alignment`，框架忽略并 warning。
 
 ---
 
 ## UDA 无监督域自适应配置
 
-设置 `mode: uda` 即可启用域自适应模式。所有 UDA 实验的核心结构是将数据划分为**源域**（有标签训练）和**目标域**（无标签适应 + 测试）。
+设置 `mode: uda` 即可启用域自适应模式。dev6 的 UDA 配置是三层正交结构：
 
-### UDA 类型
+1. **域划分（DomainPartition）** `uda.domain` —— 把数据分为源域和目标域
+2. **适应模式** `uda.adaptation` —— `transductive` 或 `inductive`
+3. **域内划分** `uda.source.split`（ValSplit）与 `uda.target.split`（Split Block）
+
+### 域维度（domain.dimension）
+
+dev6 用 `domain.dimension` 统一描述跨 / 数据集内 UDA。**R28 白名单**仅允许：
+
+| 配置值 | 含义 |
+|--------|------|
+| `dataset` | 跨数据集 UDA：整个数据集作为一个组 |
+| `subject` | 数据集内 UDA：按被试划分源域 / 目标域 |
+| `session` | 数据集内 UDA：按会话划分源域 / 目标域 |
+
+（当前版本不支持 `recording` 与 `flatten` 作为 `domain.dimension`：前者跨 recording 域偏移过小，后者与域隔离语义冲突。）
+
+### 适应模式（adaptation）
 
 | 配置值 | 说明 |
 |--------|------|
-| `type: cross-dataset` | **跨数据集 UDA**：不同数据集分别作为源域和目标域 |
-| `type: intra-dataset` | **数据集内 UDA**：在同一数据集内，按 subject 或 session 划分源域和目标域 |
+| `transductive` | 目标域全部数据同时用于无监督训练和最终测试（`target_train == target_test` 的拷贝，`target_val` 为空） |
+| `inductive` | 目标域再按 `target.split` 切为 train/val/test，在训练集上无监督训练，在测试集上评估 |
 
-### UDA 策略
-
-| 配置值 | 说明 |
-|--------|------|
-| `strategy: holdout` | 显式或按比例指定源域和目标域，产生 1 个 fold |
-| `strategy: k-fold` | 各组（数据集/被试/会话）轮流作为目标域，产生 k 个 fold |
-
-### UDA 变体
-
-| 配置值 | 说明 |
-|--------|------|
-| `variant: transductive` | 目标域全部数据同时用于无监督训练和最终测试 |
-| `variant: inductive` | 目标域划分为训练集和测试集，在目标域训练集上无监督训练，在测试集上评估 |
-
-### 跨数据集 UDA 示例
-
-**Transductive + Holdout**（最常见）：
+### 跨数据集 UDA — Transductive
 
 ```yaml
 mode: uda
-
-uda:
-  type: cross-dataset
-  strategy: holdout
-  variant: transductive
-  source_datasets: [ds_source_1, ds_source_2]
-  target_dataset: ds_target
-  source_split:
-    val_ratio: 0.15           # 可选：从源域划出验证集
-
-alignment:
-  channels:
-    method: intersection
-  labels:
-    check_consistency: true
 
 datasets:
-  ds_source_1:
-    name: bci_iv_2a
-  ds_source_2:
-    name: bci_iv_2b
-  ds_target:
-    name: physionet_mi
-```
-
-**Inductive + K-fold**（每个数据集轮流做目标域）：
-
-```yaml
-mode: uda
-
-uda:
-  type: cross-dataset
-  strategy: k-fold
-  k-folds: -1                  # 每个数据集轮流做 target
-  variant: inductive
-  target_split:
-    dimension: recording
-    train_ratio: 0.7
-    val_ratio: 0.1             # 可选：目标域验证集
-    test_ratio: 0.2
-  source_split:
-    val_ratio: 0.15
+  bcic4_2a:
+    name: BCIC4_2a_preprocessed
+  bcic4_2b:
+    name: BCIC4_2b_preprocessed
 
 alignment:
-  channels:
-    method: intersection
-  labels:
-    check_consistency: true
+  channel: intersection
+  label: true
 
-datasets:
-  ds_a:
-    name: bci_iv_2a
-  ds_b:
-    name: bci_iv_2b
-  ds_c:
-    name: physionet_mi
+uda:
+  domain:
+    strategy: holdout
+    dimension: dataset
+    source: [bcic4_2a]           # holdout + dataset 维度必填（R8）
+    target: bcic4_2b
+
+  adaptation: transductive
+
+  source:                        # 可选；省略则源域全量 train，source_val 为空
+    split:
+      dimension: recording       # ValSplit；必填 dimension，不可与 domain.dimension 相同（R11）
+      val_ratio: 0.2
+      shuffle: true
+
+# transductive 模式下不配置 target.split（R5）
+# 当前版本不支持 transductive 的 checkpoint / early_stopping（R24）
+
+model: { name: DANN }
+trainer: { name: dann_trainer }
+training: { epochs: 200, batch_size: 128, optimizer: { name: adam, params: { lr: 0.001 }}}
+evaluation: { metrics: [accuracy, f1_score] }
 ```
 
-### 数据集内 UDA 示例
-
-**Transductive + LOOCV**（最经典的 cross-subject LOOCV）：
+### 跨数据集 UDA — Inductive + K-Fold（嵌套折叠）
 
 ```yaml
 mode: uda
 
 uda:
-  type: intra-dataset
-  dimension: subject
-  strategy: k-fold
-  k-folds: -1                  # 每个被试轮流做 target
-  variant: transductive
-  source_split:
-    val_ratio: 0.15
+  domain:
+    strategy: k-fold
+    dimension: dataset
+    k: -1                        # leave-one-dataset-out
+  adaptation: inductive
+  source:
+    split:
+      dimension: subject
+      val_ratio: 0.2
+  target:
+    split:                       # 完整 Split Block
+      strategy: k-fold
+      dimension: session
+      k: 3
+      val_ratio: 0.1             # 或 val_split 子块
+```
+
+> **嵌套折叠**：inductive + target k-fold 时 domain fold × target inner fold 会展平为一维列表，`fold_info` 同时携带 `domain_fold` 与 `inner_fold`，方便 TensorBoard / 查询时回溯层次。
+
+### 数据集内 UDA — Transductive + LOOCV
+
+```yaml
+mode: uda
 
 datasets:
   main:
     name: seed_preprocessed
+
+uda:
+  domain:
+    strategy: k-fold
+    dimension: subject
+    k: -1                        # 每个被试轮流做 target
+  adaptation: transductive
+  source:
+    split:
+      dimension: recording
+      val_ratio: 0.15
 ```
 
-**Inductive + Holdout**：
+### 数据集内 UDA — Inductive + Holdout
 
 ```yaml
 mode: uda
 
-uda:
-  type: intra-dataset
-  dimension: subject
-  strategy: holdout
-  variant: inductive
-  target_count: 1              # 1 个被试作为目标域（优先于 target_ratio）
-  target_split:
-    dimension: recording
-    train_ratio: 0.7
-    val_ratio: 0.1
-    test_ratio: 0.2
-  source_split:
-    val_ratio: 0.15
-
 datasets:
   main:
     name: seed_preprocessed
+
+uda:
+  domain:
+    strategy: holdout
+    dimension: subject
+    target_count: 1              # 或 target_ratio: 0.2（R12 互斥）
+  adaptation: inductive
+  source:
+    split:
+      dimension: recording
+      val_ratio: 0.15
+  target:
+    split:
+      strategy: holdout
+      dimension: recording       # R11：必须 ≠ domain.dimension
+      train_ratio: 0.7
+      val_ratio: 0.1
+      test_ratio: 0.2
 ```
+
+### 约束提示（UDA）
+
+- **R9 / R25**：`domain.dimension ∈ {subject, session}` 要求 `len(datasets) == 1`；`len(datasets) > 1` 强制 `domain.dimension: dataset`
+- **R10**：`source.split` 只能含 `dimension / val_ratio / shuffle`（ValSplit 语义），不能出现 `strategy / train_ratio / test_ratio`
+- **R11**：`domain.dimension` 不可与 `source.split.dimension` 或 `target.split.dimension` 相同
+- **R4 / R5**：`adaptation: inductive` 下 `target.split` 必填；`transductive` 下 `target.split` 不可出现
+- **R12**：holdout + subject/session 时 `target_count` 与 `target_ratio` 互斥
+- **R24**：`transductive` 下禁止 `training.early_stopping` 与 `training.checkpoint`
 
 ### UDA 的 Batch 结构
 
-UDA 模式下，Trainer 收到的 `batch` 字典包含两个通道键：
+UDA 模式下，框架自动接线的批次字典为：
 
 ```python
+# train batch
 batch = {
-    "source": (source_data, source_labels),   # 源域有标签数据
-    "target": (target_data, target_labels),   # 目标域数据（标签不应在训练中使用）
+    "source": (source_data, source_labels),      # 有标签训练
+    "target": (target_data, target_labels),      # 目标域数据；标签不应在训练中使用
+}
+# val batch（若配置源域 / 目标域 val）
+batch = {
+    "source_val": (...),
+    "target_val": (...),
+}
+# test batch（目标域测试）
+batch = {
+    "main": (target_test_data, target_test_labels),
 }
 ```
 
-Trainer 的 `training_step` 需要据此实现域自适应训练逻辑（如对抗训练、MMD 等）。
-
-### UDA 的 Transform 规则
-
-UDA 模式下，Transform 的 `fit()` **仅在源域训练数据上执行**，`transform()` 应用到源域和目标域的所有子集。这确保目标域的统计信息不会泄露到变换参数中。
+Trainer 的 `training_step` 按这些键取出数据，实现 MMD、对抗训练等域适应算法。
 
 ---
 
 ## 实验 YAML 常见问题
 
-**Q：组件名找不到怎么办？**  
+**Q：组件名找不到怎么办？**
 A：检查 `project.yml` 中的 `models` 和 `trainers` 块，确认键名与实验 YAML 中的 `name` 字段一致，且 entrypoint 路径正确。也可以运行 `uesf project info` 查看当前项目可用的所有组件。
 
-**Q：`val_ratio_in_train` 在 K-Fold 中的作用是什么？**  
-A：K-Fold 切分产生了训练折和测试折，但早停需要验证集。`val_ratio_in_train` 从每折的训练集中再划出一部分用于早停监控，这部分数据不参与训练。
+**Q：k-fold 的 `val_ratio` 是每折中还是整体中的比例？**
+A：整体中的比例。框架按 `val_ratio / (1 - 1/k)` 自动换算为每折训练部分中的比例。例如 `k=5, val_ratio=0.1` → 每折测试集占 20%、验证集占 10%、训练集占 70%。
 
-**Q：scheduler 的参数名从哪里查？**  
+**Q：想在 val 与 test 上使用不同维度切分，怎么配置？**
+A：使用 `val_split` 子块。例如主 `dimension: subject`（跨被试泛化测试）+ `val_split.dimension: session`（折内按会话切验证集）。注意 R19 / R30 约束。
+
+**Q：跨数据集实验为什么不能用主 `val_ratio`？**
+A：验证集无法在 `dataset` 维度上切分（否则整个验证数据集都会属于另一个 alias）。R20 要求 `dimension: dataset` 时通过 `val_split` 在每个训练数据集内部独立切出验证集。
+
+**Q：单数据集用 `scope: global` 和 `scope: per_dataset` 有什么区别？**
+A：没有。`global` 的"合并训练数据集" 在单数据集下退化为单个参与者，行为与 `per_dataset` 完全一致。
+
+**Q：scheduler 的参数名从哪里查？**
 A：参数名与 PyTorch 官方文档完全一致，参见[内置组件列表](../reference/04_builtin_components.md)中的调度器对应关系。

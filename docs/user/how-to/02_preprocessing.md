@@ -140,7 +140,7 @@ preprocess:
     axis: -1          # 沿哪个轴计算，-1 表示时间轴
 ```
 
-> **关于跨被试全局标准化**：预处理阶段**禁止**做跨被试的全局 Z-Score（这会导致数据泄露）。全局标准化应在实验配置的 `transforms` 中使用 `zscore_normalize`，配合 `fit_on: train` 严格执行 Fit-on-Train 原则。详见[数据泄露防护机制](../concepts/02_data_leakage_prevention.md)。
+> **关于跨被试全局标准化**：预处理阶段**禁止**做跨被试的全局 Z-Score（这会导致数据泄露）。全局标准化应在实验配置的 `transforms` 中使用 `zscore_normalize`（通过 `scope: per_dataset` 或 `global` 声明 fit 范围，框架严格按 fit-on-train 执行）。详见[数据泄露防护机制](../concepts/02_data_leakage_prevention.md)。
 
 ---
 

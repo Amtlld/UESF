@@ -182,10 +182,10 @@ uesf project info
 uesf experiment add --name baseline_cnn
 ```
 
-编辑生成的 `experiments/baseline_cnn.yml`：
+编辑生成的 `experiments/baseline_cnn.yml`（dev6 顶层 `split`，自动通道接线）：
 
 ```yaml
-name: baseline_cnn
+experiment_name: baseline_cnn
 description: "EmotionCNN 1D，5-Fold 跨被试交叉验证，Adam + 余弦退火"
 seed: 42
 
@@ -202,24 +202,16 @@ trainer:
 datasets:
   main:
     name: seed_preprocessed
-    split:
-      strategy: k-fold
-      dimension: subject        # 按被试切分：同一被试不跨训练/测试集
-      k-folds: 5
-      val_ratio_in_train: 0.1   # 从训练折划出 10% 用于早停监控
-      shuffle: true
     transforms:
       - name: zscore_normalize
-        fit_on: train           # 只用训练集计算均值和标准差
-        apply_to: all           # 统一应用到 train/val/test
+        scope: per_dataset        # 每数据集独立 fit-on-train；单数据集时与 global 等价
 
-dataloaders:
-  train:
-    main: "main.train"
-  val:
-    main: "main.val"
-  test:
-    main: "main.test"
+split:
+  strategy: k-fold
+  dimension: subject              # 按被试切分：同一被试不跨训练/测试集
+  k: 5
+  val_ratio: 0.1                  # 从整体切出 10% 作验证；框架按折内部换算
+  shuffle: true
 
 training:
   epochs: 100
@@ -235,17 +227,19 @@ training:
   gradient_clip:
     max_norm: 1.0
   early_stopping:
-    monitor: val_accuracy
+    metric: val_accuracy
     patience: 15
     mode: max
+  checkpoint:
+    metric: val_accuracy
+    mode: max
+  # logging:                      # 可选，安装 uesf[tensorboard] 后启用
+  #   backend: tensorboard
+  #   log_every_n_epochs: 1
 
 evaluation:
   metrics: [accuracy, f1_score, precision, recall, auroc]
-  k_fold_aggregation: concat    # 所有折的预测拼接后一次性计算指标
-
-logging:
-  use_wandb: false
-  checkpoint_metric: val_accuracy
+  k_fold_aggregation: concat      # 所有折的预测拼接后一次性计算指标
 ```
 
 ---

@@ -141,22 +141,47 @@ uesf experiment run --exp baseline_cnn
 
 ---
 
-## Weights & Biases 集成
+## TensorBoard 集成
 
-在实验 YAML 的 `logging` 块中启用：
+在实验 YAML 的 `training.logging` 块中启用：
 
 ```yaml
-logging:
-  use_wandb: true
-  checkpoint_metric: val_accuracy
+training:
+  epochs: 100
+  batch_size: 64
+  optimizer: { name: adam, params: { lr: 0.001 }}
+  logging:
+    backend: tensorboard
+    log_every_n_epochs: 1         # 正整数，控制写入频率
+    log_graph: false              # 可选，是否记录模型计算图
 ```
 
-确保已安装并登录 W&B：
+`tensorboard` 是可选依赖，按需安装：
 
 ```bash
-pip install wandb
-wandb login
+uv pip install uesf[tensorboard]
 ```
+
+每个 fold 独立写入 `experiments/results/<experiment_name>/fold_<i>/tb_logs/`：
+
+```
+experiments/results/baseline_cnn/
+├── fold_0/
+│   ├── checkpoints/best_model.pt
+│   └── tb_logs/events.out.tfevents.*
+├── fold_1/
+│   ├── checkpoints/best_model.pt
+│   └── tb_logs/events.out.tfevents.*
+└── ...
+```
+
+一次性查看所有 fold 的训练曲线：
+
+```bash
+tensorboard --logdir experiments/results/baseline_cnn
+```
+
+> **约束**：`training.logging.backend` 目前仅支持 `tensorboard`（R17），`log_every_n_epochs` 必须为正整数（R18）。`adaptation: transductive` 下不允许配置 `training.checkpoint` 或 `training.early_stopping`（R24）。
 
 ---
 

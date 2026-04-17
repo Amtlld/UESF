@@ -186,43 +186,35 @@ preprocessed_datasets:
 uesf experiment add --name quickstart_exp
 ```
 
-编辑生成的 `experiments/quickstart_exp.yml`：
+编辑生成的 `experiments/quickstart_exp.yml`（dev6 顶层 `split`，框架自动通道接线）：
 
 ```yaml
-name: quickstart_exp
+experiment_name: quickstart_exp
 description: 快速上手测试实验
 seed: 42
 
 model:
-  name: dummy        # 内置 Dummy 模型，随机输出，仅用于验证流程
+  name: dummy_model   # 内置 Dummy 模型，随机输出，仅用于验证流程
   params: {}
 
 trainer:
-  name: dummy        # 内置 Dummy 训练器
+  name: dummy_trainer # 内置 Dummy 训练器
   params: {}
 
 datasets:
   main:
     name: seed_preprocessed
-    split:
-      strategy: holdout
-      dimension: subject      # 按被试切分，防止数据泄露
-      shuffle: true
-      train_ratio: 0.7
-      val_ratio: 0.15
-      test_ratio: 0.15
     transforms:
       - name: zscore_normalize
-        fit_on: train
-        apply_to: all
+        scope: per_dataset   # 每数据集独立 fit-on-train；单数据集时与 global 等价
 
-dataloaders:
-  train:
-    main: "main.train"
-  val:
-    main: "main.val"
-  test:
-    main: "main.test"
+split:
+  strategy: holdout
+  dimension: subject         # 按被试切分，防止数据泄露
+  shuffle: true
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
 
 training:
   epochs: 3
@@ -230,12 +222,15 @@ training:
   optimizer:
     name: adam
     params: { lr: 0.001 }
+  checkpoint:
+    metric: val_accuracy
+    mode: max
+  # logging:                 # 可选，安装 uesf[tensorboard] 后启用
+  #   backend: tensorboard
+  #   log_every_n_epochs: 1
 
 evaluation:
   metrics: [accuracy, f1_score]
-
-logging:
-  checkpoint_metric: val_accuracy
 ```
 
 运行实验：

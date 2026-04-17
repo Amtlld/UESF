@@ -183,16 +183,17 @@ metrics:
 
 完整字段参见 [如何配置实验 YAML](../how-to/06_configure_experiment.md)。
 
-以下是字段速查表：
+以下是字段速查表（dev6 顶层 `split`，自动通道接线；配置校验规则编号参见 `docs/version_design/0.1.0.dev6_design/07_config_validation_rules.md`）：
 
 ### 顶层字段
 
 | 字段 | 是否必填 | 类型 | 说明 |
 |------|----------|------|------|
-| `name` | 必填 | string | 实验名称（与文件名一致） |
+| `experiment_name` | 必填 | string | 实验名称（与文件名一致） |
 | `description` | 可选 | string | 实验描述 |
-| `seed` | 推荐 | int | 随机种子，保证切分可复现 |
+| `seed` | 可选 | int | 随机种子；默认 42。框架内部派生多层种子 |
 | `mode` | 可选 | string | `regular`（默认）或 `uda` |
+| `device` | 可选 | string | 覆盖全局 `default_device`（如 `cuda:0`） |
 
 ### model / trainer
 
@@ -200,86 +201,99 @@ metrics:
 |------|------|
 | `model.name` | 组件名，对应 `project.yml` 中 `models` 块的键名 |
 | `model.params` | 传入 `__init__` 的 kwargs 字典 |
-| `trainer.name` / `trainer.params` | 同上 |
+| `trainer.name` / `trainer.params` | 同上；未配置时默认使用内置 `dummy_trainer` |
 
 ### datasets
 
 | 字段 | 说明 |
 |------|------|
 | `datasets.<alias>.name` | 预处理数据集名称 |
-| `datasets.<alias>.split.strategy` | `holdout` 或 `k-fold` |
-| `datasets.<alias>.split.dimension` | `subject`、`session`、`recording`、`none` |
-| `datasets.<alias>.split.shuffle` | bool，是否随机打乱 |
-| `datasets.<alias>.split.k-folds` | K-Fold 专有，折数；`-1` 为 LOOCV |
-| `datasets.<alias>.split.val_ratio_in_train` | K-Fold 专有，从训练折划出的验证比例 |
-| `datasets.<alias>.split.train_ratio` | Holdout 专有 |
-| `datasets.<alias>.split.val_ratio` | Holdout 专有 |
-| `datasets.<alias>.split.test_ratio` | Holdout 专有 |
-| `datasets.<alias>.transforms` | 在线变换列表（`name`、`fit_on`、`apply_to`、`params`） |
+| `datasets.<alias>.transforms` | 在线变换列表，每项含 `name`、`scope: per_dataset \| global`、`params` |
 
-### split（顶层，`dimension: dataset` 时使用）
+> dev6 移除了 `datasets.<alias>.split` —— 整个实验只有一份顶层 `split`。
 
-当按数据集维度切分时，`split` 块位于与 `datasets` 同级的顶层：
+### split（Regular 模式顶层必填）
 
 | 字段 | 说明 |
 |------|------|
-| `split.dimension` | 必须为 `dataset` |
-| `split.train` | 显式指定训练集数据集别名列表（优先） |
-| `split.val` | 显式指定验证集数据集别名列表（可选） |
-| `split.test` | 显式指定测试集数据集别名列表（优先） |
-| `split.train_ratio` | 未显式指定时，按比例分配 |
-| `split.val_ratio` | 未显式指定时，按比例分配 |
-| `split.test_ratio` | 未显式指定时，按比例分配 |
-| `split.shuffle` | bool，比例分配时是否随机打乱 |
+| `split.strategy` | `holdout` 或 `k-fold` |
+| `split.dimension` | `subject` / `session` / `recording` / `flatten` / `dataset`（五选一） |
+| `split.shuffle` | bool，是否打乱分组顺序（默认 `true`，R27；`flatten` 强制为 `true`，R26） |
+| `split.train_ratio` | holdout 必填 |
+| `split.val_ratio` | holdout 与 k-fold 可选；与 `val_split` 互斥（R19） |
+| `split.test_ratio` | holdout 必填 |
+| `split.k` | k-fold 必填，`>1` 或 `-1`（LOOCV）；`dimension: dataset` 时 `-1` 或 `== len(datasets)`（R14） |
+| `split.assign` | `dimension: dataset` + holdout 必填：`{train: [...], test: [...]}`，覆盖全部声明的 alias（R13） |
+| `split.val_split` | 独立 ValSplit 子块（可选）：`{dimension, val_ratio(0 < _ < 1), shuffle?}`；主 `dimension: flatten` 要求也为 `flatten`（R30） |
 
 ### uda（`mode: uda` 时必填）
 
+#### uda.domain（DomainPartition）
+
 | 字段 | 说明 |
 |------|------|
-| `uda.type` | `cross-dataset`（跨数据集）或 `intra-dataset`（数据集内） |
-| `uda.strategy` | `holdout` 或 `k-fold` |
-| `uda.variant` | `transductive` 或 `inductive` |
-| `uda.dimension` | `intra-dataset` 专有，`subject` 或 `session` |
-| `uda.target_count` | `intra-dataset` holdout 专有，目标域包含的组数（优先于 `target_ratio`） |
-| `uda.target_ratio` | `intra-dataset` holdout 专有，目标域占总组数的比例 |
-| `uda.source_datasets` | `cross-dataset` holdout 专有，源域数据集别名列表 |
-| `uda.target_dataset` | `cross-dataset` holdout 专有，目标域数据集别名 |
-| `uda.k-folds` | k-fold 策略专有，折数；`-1` 或 `total` 为 LOOCV |
-| `uda.source_split.val_ratio` | 可选，从源域划出验证集的比例 |
-| `uda.target_split.dimension` | `inductive` 专有，目标域内部切分维度 |
-| `uda.target_split.train_ratio` | `inductive` 专有 |
-| `uda.target_split.val_ratio` | `inductive` 专有，可选 |
-| `uda.target_split.test_ratio` | `inductive` 专有 |
+| `uda.domain.strategy` | `holdout` 或 `k-fold` |
+| `uda.domain.dimension` | `dataset` / `subject` / `session`（R28 白名单；不支持 recording / flatten） |
+| `uda.domain.shuffle` | bool，是否打乱分组顺序（默认 `true`） |
+| `uda.domain.source` | `dataset + holdout` 必填：源域数据集别名列表（R8） |
+| `uda.domain.target` | `dataset + holdout` 必填：目标域数据集别名（R8） |
+| `uda.domain.target_count` | `subject/session + holdout` 必填：目标域组数（与 `target_ratio` 互斥，R12） |
+| `uda.domain.target_ratio` | `subject/session + holdout` 必填：目标域比例（与 `target_count` 互斥，R12） |
+| `uda.domain.k` | k-fold 必填；`-1` 为 leave-one-out |
+
+#### uda.adaptation
+
+| 字段 | 说明 |
+|------|------|
+| `uda.adaptation` | `transductive` 或 `inductive` |
+
+#### uda.source（可选；省略时源域全量作训练，`source_val` 为空）
+
+| 字段 | 说明 |
+|------|------|
+| `uda.source.split.dimension` | ValSplit 维度；不可与 `domain.dimension` 相同（R11） |
+| `uda.source.split.val_ratio` | `[0, 1)`；`> 0` 时切出验证集 |
+| `uda.source.split.shuffle` | bool，默认 `true`；`dimension: flatten` 强制为 `true` |
+
+> `source.split` 是 ValSplit Block，不可包含 `strategy / train_ratio / test_ratio`（R10）。
+
+#### uda.target.split（inductive 必填；transductive 不可出现）
+
+| 字段 | 说明 |
+|------|------|
+| `uda.target.split.strategy` | `holdout` 或 `k-fold` |
+| `uda.target.split.dimension` | 同 Split Block；不可与 `domain.dimension` 相同（R11） |
+| `uda.target.split.shuffle` | bool，默认 `true` |
+| `uda.target.split.train_ratio` | holdout 必填 |
+| `uda.target.split.test_ratio` | holdout 必填（R4） |
+| `uda.target.split.val_ratio` | 可选；与 `val_split` 互斥（R19） |
+| `uda.target.split.k` | k-fold 必填（R4） |
+| `uda.target.split.val_split` | 独立 ValSplit 子块（可选） |
 
 ### alignment（多数据集实验可选）
 
 | 字段 | 说明 |
 |------|------|
-| `alignment.channels.method` | 通道对齐方法，目前仅支持 `intersection` |
-| `alignment.labels.check_consistency` | bool，是否验证标签一致性（默认 `true`） |
+| `alignment.channel` | 通道对齐方式，目前仅支持 `intersection` |
+| `alignment.label` | bool，是否验证标签一致性（默认 `true`） |
+
+> 单数据集实验配置 `alignment` 时会被忽略并发出 warning（R16）。多数据集下框架同时校验 `n_samples` 一致（`ShapeMismatchError`）并对采样率不一致 warning。
 
 ### dataloaders
 
-```yaml
-# 常规模式
-dataloaders:
-  train:
-    <channel_name>: "<dataset_alias>.<split_phase>"
-  val:
-    <channel_name>: "<dataset_alias>.val"
-  test:
-    <channel_name>: "<dataset_alias>.test"
+dev6 **自动通道接线**，无需配置。Trainer 接到的 `batch` 键：
 
-# UDA 模式（框架自动生成 source/target 通道）
-# 训练时 batch 包含 "source" 和 "target" 两个键
-```
+| mode | train | val | test |
+|------|-------|-----|------|
+| regular（单数据集 / `dimension: dataset`） | `main` | `main` | `main` |
+| uda | `source`, `target` | `source_val`, `target_val` | `main` |
 
 ### training
 
 | 字段 | 是否必填 | 类型 | 说明 |
 |------|----------|------|------|
 | `epochs` | 必填 | int | 最大训练轮数 |
-| `batch_size` | 必填 | int | 批次大小 |
+| `batch_size` | 可选 | int | 批次大小，默认 32 |
 | `optimizer.name` | 必填 | string | 优化器名称 |
 | `optimizer.params.lr` | 必填 | float | 学习率 |
 | `optimizer.params.*` | 可选 | - | 其他 PyTorch 优化器参数（与官方 API 一致） |
@@ -287,16 +301,22 @@ dataloaders:
 | `gradient_clip.norm_type` | 可选 | int | 范数类型，默认 2 |
 | `scheduler.name` | 可选 | string | 调度器名称 |
 | `scheduler.params` | 可选 | dict | 调度器参数（与 PyTorch 官方 API 一致） |
-| `early_stopping.monitor` | 可选 | string | 监控的指标名称 |
+| `early_stopping.metric` | 可选 | string | 监控的指标名称 |
 | `early_stopping.patience` | 可选 | int | 容忍轮数 |
 | `early_stopping.min_delta` | 可选 | float | 最小改善量，默认 0.0 |
 | `early_stopping.mode` | 可选 | string | `max` 或 `min` |
+| `checkpoint.metric` | 可选 | string | 选择 best model 的指标（如 `val_accuracy`） |
+| `checkpoint.mode` | 可选 | string | `max`（默认）或 `min` |
+| `checkpoint.dir` | 可选 | string | 自定义 checkpoint 目录 |
+| `logging.backend` | 可选 | string | 仅允许 `tensorboard`（R17） |
+| `logging.log_every_n_epochs` | 可选 | int | 正整数（R18），默认 1 |
+| `logging.log_graph` | 可选 | bool | 是否记录模型计算图，默认 `false` |
 
-### evaluation / logging
+> **R24**：`uda.adaptation: transductive` 时 `early_stopping` 与 `checkpoint` 不可出现。
+
+### evaluation
 
 | 字段 | 是否必填 | 说明 |
 |------|----------|------|
-| `evaluation.metrics` | 必填 | 指标名称列表 |
+| `evaluation.metrics` | 可选 | 指标名称列表，默认 `[accuracy]` |
 | `evaluation.k_fold_aggregation` | 可选 | `concat`（默认）或 `mean_std` |
-| `logging.use_wandb` | 可选 | bool，是否启用 W&B |
-| `logging.checkpoint_metric` | 推荐 | 保存最优检查点的依据指标 |

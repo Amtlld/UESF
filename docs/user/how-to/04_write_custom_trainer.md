@@ -64,7 +64,7 @@ class BaseTrainer:
 ```
 
 其中：
-- 键名对应实验 YAML 的 `dataloaders` 中定义的通道名
+- 键名由 dev6 自动通道接线决定 —— Regular（单数据集或 `dimension: dataset`）为 `"main"`；UDA 的 train batch 为 `{"source", "target"}`，val batch 为 `{"source_val", "target_val"}`，test batch 为 `{"main"}`
 - `data_tensor` 形状：`(batch_size, n_channels, n_samples)`
 - `labels_tensor` 形状：`(batch_size,)`，类型为 `torch.long`
 

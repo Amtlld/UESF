@@ -87,12 +87,14 @@ UESF 管理三类数据集对象，每种在系统中的角色不同：
 
 阶段 3：在线变换（Online Transforms）
   └── zscore_normalize：
-      - fit_on: train  → 只从 train 索引对应的样本计算 μ, σ
-      - apply_to: all  → 用同一组 μ, σ 变换所有样本
+      - scope: per_dataset  → 每数据集独立 fit-on-train，transform 自身所有相
+                              跨数据集时：训练数据集 fit on train；测试数据集 fit on 自身全量
+      - scope: global       → 所有训练数据集的 train 部分合并 fit（仅 Regular 模式）
 
 阶段 4：DataLoader 构建（Multi-channel Dataloading）
-  └── 根据 dataloaders 配置，将切分相（.train/.val/.test）
-      组装为多通道字典 DataLoader
+  └── 框架根据 mode 自动接线多通道字典：
+      Regular：{ "main": ... }  （单 / 多数据集合并后）
+      UDA：     { "source", "target" } / { "source_val", "target_val" } / { "main" }
 
 阶段 5：训练与评估（Runner + Trainer + Evaluator）
   └── Runner 驱动训练循环
@@ -106,14 +108,19 @@ UESF 管理三类数据集对象，每种在系统中的角色不同：
 ```
 阶段 1：数据加载 + 跨数据集对齐（同上）
 
-阶段 2：UDA 切分（UDA Splitter）
-  ├── 跨数据集：按 alias 将数据集分为源域和目标域
-  └── 数据集内：按 subject/session 分组，将组分配到源域和目标域
-      Transductive：目标域全部数据 = 训练 + 测试
-      Inductive：目标域按 target_split 配置再切分 train(/val)/test
+阶段 2：UDA 切分（UDAOrchestrator）
+  ├── 根据 uda.domain.dimension 选择 DatasetDomainSplitter 或 DimensionDomainSplitter
+  │    - dataset：按 alias 将数据集分为源域和目标域
+  │    - subject/session：按组分配到源域和目标域（单数据集内）
+  └── 域内划分：
+      Transductive：目标域全部数据同时用于无监督训练和测试（target_val 为空）
+      Inductive：按 uda.target.split 配置再切分 target_train/val/test
+                  嵌套折叠（domain × inner target fold）展平为一维列表
 
-阶段 3：在线变换
-  └── fit_on: 源域训练数据 → apply_to: 源域 + 目标域所有子集
+阶段 3：在线变换（始终 per_dataset，R23）
+  └── 源域：fit on 自身 source_train → transform source_train / source_val
+      目标域 inductive：   fit on 自身 target_train → transform target_train/val/test
+      目标域 transductive：fit on 自身目标域全量数据 → transform 同一份数据
 
 阶段 4：DataLoader 构建
   └── 训练 batch 包含 "source" 和 "target" 两个通道键
