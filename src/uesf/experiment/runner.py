@@ -11,6 +11,7 @@ and metric computation to the Evaluator. The Runner handles:
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from uesf.core.logging import get_logger
+from uesf.experiment.logger import TrainingLogger
 
 logger = get_logger("experiment.runner")
 
@@ -163,8 +165,15 @@ class Runner:
         checkpoint_dir: Path | None = None,
         checkpoint_metric: str | None = None,
         early_stopping_config: dict[str, Any] | None = None,
+        training_logger: TrainingLogger | None = None,
+        log_every_n_epochs: int = 1,
     ) -> dict[str, Any]:
         """Run the full training loop.
+
+        Args:
+            training_logger: Optional :class:`TrainingLogger`; wrapped in a
+                context manager so ``close()`` still runs on exception.
+            log_every_n_epochs: Log cadence when ``training_logger`` is given.
 
         Returns:
             Dict with training history and best metrics.
@@ -178,58 +187,80 @@ class Runner:
             )
 
         best_metric_value = None
-        best_metrics = {}
+        best_metrics: dict[str, Any] = {}
         history: list[dict[str, Any]] = []
 
-        for epoch in range(self.epochs):
-            # Training
-            train_metrics = self.train_epoch(train_loader, optimizer, epoch)
+        logger_cm = training_logger if training_logger is not None else contextlib.nullcontext()
 
-            # Validation
-            val_metrics = {}
-            if val_loader and len(val_loader) > 0:
-                val_metrics, _, _ = self.validate_epoch(val_loader)
-                # Prefix val metrics
-                val_metrics = {f"val_{k}": v for k, v in val_metrics.items()}
+        with logger_cm:
+            for epoch in range(self.epochs):
+                train_metrics = self.train_epoch(train_loader, optimizer, epoch)
 
-            # Scheduler step
-            if scheduler is not None:
-                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    monitor = early_stopping_config.get("monitor", "val_loss") if early_stopping_config else "val_loss"
-                    monitor_val = val_metrics.get(monitor, train_metrics.get("loss", 0.0))
-                    if isinstance(monitor_val, (int, float)):
-                        scheduler.step(monitor_val)
-                else:
-                    scheduler.step()
+                val_metrics: dict[str, Any] = {}
+                if val_loader and len(val_loader) > 0:
+                    val_metrics, _, _ = self.validate_epoch(val_loader)
+                    val_metrics = {f"val_{k}": v for k, v in val_metrics.items()}
 
-            # Combine metrics
-            epoch_result = {**train_metrics, **val_metrics, "epoch": epoch}
-            history.append(epoch_result)
-
-            logger.info("Epoch %d/%d - %s", epoch + 1, self.epochs, _format_metrics(epoch_result))
-
-            # Checkpoint saving
-            if checkpoint_dir and checkpoint_metric and checkpoint_metric in val_metrics:
-                metric_val = val_metrics[checkpoint_metric]
-                if isinstance(metric_val, (int, float)):
-                    if best_metric_value is None or metric_val > best_metric_value:
-                        best_metric_value = metric_val
-                        best_metrics = {**train_metrics, **val_metrics}
-                        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                        torch.save(
-                            self.trainer.model.state_dict(),
-                            checkpoint_dir / "best_model.pt",
+                if scheduler is not None:
+                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        monitor = (
+                            early_stopping_config.get("monitor", "val_loss")
+                            if early_stopping_config
+                            else "val_loss"
                         )
-                        logger.info("Saved best checkpoint (%s=%.4f)", checkpoint_metric, metric_val)
+                        monitor_val = val_metrics.get(monitor, train_metrics.get("loss", 0.0))
+                        if isinstance(monitor_val, (int, float)):
+                            scheduler.step(monitor_val)
+                    else:
+                        scheduler.step()
 
-            # Early stopping
-            if early_stopper and early_stopping_config:
-                monitor = early_stopping_config["monitor"]
-                combined = {**train_metrics, **val_metrics}
-                if monitor in combined and isinstance(combined[monitor], (int, float)):
-                    if early_stopper.step(combined[monitor]):
-                        logger.info("Early stopping triggered at epoch %d", epoch + 1)
-                        break
+                epoch_result = {**train_metrics, **val_metrics, "epoch": epoch}
+                history.append(epoch_result)
+
+                logger.info(
+                    "Epoch %d/%d - %s",
+                    epoch + 1,
+                    self.epochs,
+                    _format_metrics(epoch_result),
+                )
+
+                if training_logger is not None and ((epoch + 1) % log_every_n_epochs == 0):
+                    scalars: dict[str, float] = {}
+                    for k, v in train_metrics.items():
+                        if isinstance(v, (int, float)):
+                            scalars[k] = float(v)
+                    for k, v in val_metrics.items():
+                        if isinstance(v, (int, float)):
+                            scalars[k] = float(v)
+                    scalars["lr"] = float(optimizer.param_groups[0]["lr"])
+                    training_logger.log_scalars(scalars, step=epoch)
+
+                if checkpoint_dir and checkpoint_metric and checkpoint_metric in val_metrics:
+                    metric_val = val_metrics[checkpoint_metric]
+                    if isinstance(metric_val, (int, float)):
+                        if best_metric_value is None or metric_val > best_metric_value:
+                            best_metric_value = metric_val
+                            best_metrics = {**train_metrics, **val_metrics}
+                            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                            torch.save(
+                                self.trainer.model.state_dict(),
+                                checkpoint_dir / "best_model.pt",
+                            )
+                            logger.info(
+                                "Saved best checkpoint (%s=%.4f)",
+                                checkpoint_metric,
+                                metric_val,
+                            )
+
+                if early_stopper and early_stopping_config:
+                    monitor = early_stopping_config["monitor"]
+                    combined = {**train_metrics, **val_metrics}
+                    if monitor in combined and isinstance(combined[monitor], (int, float)):
+                        if early_stopper.step(combined[monitor]):
+                            logger.info(
+                                "Early stopping triggered at epoch %d", epoch + 1
+                            )
+                            break
 
         return {
             "history": history,

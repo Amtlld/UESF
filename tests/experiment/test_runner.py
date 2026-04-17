@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 
@@ -147,3 +148,105 @@ class TestRunner:
         )
         # Should stop before 100 epochs
         assert result["epochs_run"] <= 100
+
+
+class _StubLogger:
+    """Minimal TrainingLogger-like stub that records calls."""
+
+    def __init__(self, fail_on_epoch: int | None = None) -> None:
+        self.scalar_calls: list[tuple[dict, int]] = []
+        self.closed = False
+        self.fail_on_epoch = fail_on_epoch
+        self.entered = False
+
+    def log_scalars(self, tag_value_dict, step):
+        if self.fail_on_epoch is not None and step == self.fail_on_epoch:
+            raise RuntimeError("stub failure")
+        self.scalar_calls.append((dict(tag_value_dict), step))
+
+    def log_graph(self, model, input_sample):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+class TestRunnerLogger:
+    def _make_runner_and_loaders(self, epochs=4):
+        model = SimpleModel()
+        device = torch.device("cpu")
+        trainer = SimpleTrainer(model, device)
+        evaluator = Evaluator({"accuracy": accuracy})
+        runner = Runner(trainer, evaluator, device, {"epochs": epochs})
+
+        def _loader(phase):
+            data = np.random.randn(20, 10).astype(np.float32)
+            labels = np.random.randint(0, 2, 20)
+            return DataloaderBuilder().build(
+                {"main": data}, {"main": labels}, batch_size=5, shuffle=(phase == "train")
+            )
+
+        return runner, _loader
+
+    def test_logger_invoked_each_epoch_by_default(self):
+        runner, make_loader = self._make_runner_and_loaders(epochs=3)
+        logger = _StubLogger()
+        optimizer = torch.optim.SGD(runner.trainer.model.parameters(), lr=0.01)
+        runner.run(
+            train_loader=make_loader("train"),
+            val_loader=make_loader("val"),
+            optimizer=optimizer,
+            training_logger=logger,
+        )
+        assert logger.entered and logger.closed
+        assert len(logger.scalar_calls) == 3
+        # Each call should include loss, val_accuracy, lr
+        tags, _ = logger.scalar_calls[0]
+        assert "loss" in tags and "lr" in tags
+
+    def test_log_every_n_epochs_respected(self):
+        runner, make_loader = self._make_runner_and_loaders(epochs=5)
+        logger = _StubLogger()
+        optimizer = torch.optim.SGD(runner.trainer.model.parameters(), lr=0.01)
+        runner.run(
+            train_loader=make_loader("train"),
+            val_loader=make_loader("val"),
+            optimizer=optimizer,
+            training_logger=logger,
+            log_every_n_epochs=2,
+        )
+        # Only epochs 1 and 3 (0-indexed +1) trigger: (1+1)%2==0, (3+1)%2==0, (5)%2==... wait
+        # Rule: (epoch + 1) % n == 0. epochs 0..4 → triggers at epochs 1, 3 → 2 calls.
+        assert len(logger.scalar_calls) == 2
+
+    def test_logger_close_on_exception(self):
+        runner, make_loader = self._make_runner_and_loaders(epochs=3)
+        logger = _StubLogger(fail_on_epoch=1)
+        optimizer = torch.optim.SGD(runner.trainer.model.parameters(), lr=0.01)
+        with pytest.raises(RuntimeError, match="stub failure"):
+            runner.run(
+                train_loader=make_loader("train"),
+                val_loader=make_loader("val"),
+                optimizer=optimizer,
+                training_logger=logger,
+            )
+        assert logger.closed, "logger.close() must run even if training raises"
+
+    def test_no_logger_has_no_effect(self):
+        runner, make_loader = self._make_runner_and_loaders(epochs=2)
+        optimizer = torch.optim.SGD(runner.trainer.model.parameters(), lr=0.01)
+        # Sanity: passing None works identically to omitting.
+        result = runner.run(
+            train_loader=make_loader("train"),
+            val_loader=make_loader("val"),
+            optimizer=optimizer,
+            training_logger=None,
+        )
+        assert result["epochs_run"] == 2
