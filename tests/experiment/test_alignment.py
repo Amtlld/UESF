@@ -5,10 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from uesf.core.exceptions import ConfigError
+from uesf.core.exceptions import ConfigError, ShapeMismatchError
 from uesf.experiment.alignment import (
     IntersectionAligner,
     LabelAligner,
+    check_sample_consistency,
     create_channel_aligner,
 )
 
@@ -160,3 +161,29 @@ class TestCreateChannelAligner:
     def test_unknown(self):
         with pytest.raises(ConfigError, match="Unknown"):
             create_channel_aligner("spherical_spline")
+
+
+class TestCheckSampleConsistency:
+    def test_matching_n_samples_passes(self):
+        meta = {
+            "a": {"n_samples": 500},
+            "b": {"n_samples": 500, "sampling_rate": 128},
+        }
+        check_sample_consistency(meta)  # no raise
+
+    def test_mismatching_n_samples_raises(self):
+        meta = {"a": {"n_samples": 500}, "b": {"n_samples": 1000}}
+        with pytest.raises(ShapeMismatchError, match="n_samples"):
+            check_sample_consistency(meta)
+
+    def test_sampling_rate_mismatch_warns(self, caplog):
+        meta = {
+            "a": {"n_samples": 500, "sampling_rate": 128},
+            "b": {"n_samples": 500, "sampling_rate": 256},
+        }
+        with caplog.at_level("WARNING", logger="uesf.experiment.alignment"):
+            check_sample_consistency(meta)
+        assert any("Sampling rate drift" in rec.message for rec in caplog.records)
+
+    def test_single_dataset_is_noop(self):
+        check_sample_consistency({"only": {"n_samples": 100}})

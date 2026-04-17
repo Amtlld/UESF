@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from uesf.core.exceptions import ConfigError
+from uesf.core.exceptions import ConfigError, ShapeMismatchError
 from uesf.core.logging import get_logger
 
 logger = get_logger("experiment.alignment")
@@ -172,3 +172,51 @@ class LabelAligner:
 
         logger.info("Label alignment validated: %d classes across %d datasets",
                      ref_n_classes, len(aliases))
+
+
+# ---------------------------------------------------------------------------
+# n_samples / sampling-rate consistency (dev6 addition)
+# ---------------------------------------------------------------------------
+
+
+def check_sample_consistency(datasets_meta: dict[str, dict]) -> None:
+    """Verify cross-dataset ``n_samples`` alignment; warn on sampling rate drift.
+
+    Args:
+        datasets_meta: alias -> meta dict carrying at least ``n_samples``
+            and optionally ``sampling_rate`` / ``sample_rate``.
+
+    Raises:
+        ShapeMismatchError: if any two datasets disagree on ``n_samples``.
+    """
+    if len(datasets_meta) < 2:
+        return
+    aliases = list(datasets_meta.keys())
+    ref_alias = aliases[0]
+    ref_n = datasets_meta[ref_alias].get("n_samples")
+    if ref_n is None:
+        return
+    for alias in aliases[1:]:
+        n = datasets_meta[alias].get("n_samples")
+        if n is None:
+            continue
+        if n != ref_n:
+            raise ShapeMismatchError(
+                f"n_samples mismatch: '{ref_alias}'={ref_n} vs '{alias}'={n}",
+                hint="Ensure all datasets share the same window length in preprocessing.",
+            )
+
+    # Sampling rate drift → warning only
+    def _rate(meta: dict) -> Any:
+        return meta.get("sampling_rate") or meta.get("sample_rate")
+
+    ref_rate = _rate(datasets_meta[ref_alias])
+    if ref_rate is None:
+        return
+    for alias in aliases[1:]:
+        rate = _rate(datasets_meta[alias])
+        if rate is not None and rate != ref_rate:
+            logger.warning(
+                "Sampling rate drift: '%s'=%s Hz vs '%s'=%s Hz — window length may differ.",
+                ref_alias, ref_rate, alias, rate,
+            )

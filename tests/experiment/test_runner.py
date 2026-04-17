@@ -7,8 +7,7 @@ import torch
 import torch.nn as nn
 
 from uesf.components.builtin_metrics import accuracy
-from uesf.experiment.dataloader_builder import build_dataloaders
-from uesf.experiment.dataset import EEGDataset
+from uesf.experiment.dataloader_builder import DataloaderBuilder
 from uesf.experiment.evaluator import Evaluator
 from uesf.experiment.runner import EarlyStopping, Runner
 
@@ -91,8 +90,10 @@ class TestRunner:
     def _make_loader(self, n=40, phase="train"):
         data = np.random.randn(n, 10).astype(np.float32)
         labels = np.random.randint(0, 2, n)
-        ds = EEGDataset(data, labels)
-        return build_dataloaders({"main": ds}, batch_size=10, phase=phase)
+        builder = DataloaderBuilder()
+        return builder.build(
+            {"main": data}, {"main": labels}, batch_size=10, shuffle=(phase == "train"),
+        )
 
     def test_train_epoch(self):
         runner = self._make_runner()
