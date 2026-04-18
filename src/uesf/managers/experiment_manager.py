@@ -252,7 +252,7 @@ class ExperimentManager:
             trainer_cls, trainer_params, trainer_id = self._init_trainer(
                 cfg, project_config, project_dir
             )
-            metric_funcs = self._init_metrics(cfg.get("evaluation", {}), project_config, project_dir)
+            metric_funcs = self._init_metrics(cfg, project_config, project_dir)
 
             self.db.execute(
                 """UPDATE experiments SET model_id = ?, trainer_id = ?,
@@ -374,8 +374,18 @@ class ExperimentManager:
         )
         return trainer_cls, trainer_params, trainer_id
 
-    def _init_metrics(self, eval_config, project_config, project_dir):
-        metric_names = eval_config.get("metrics") or ["accuracy"]
+    def _init_metrics(self, cfg, project_config, project_dir):
+        eval_config = cfg.get("evaluation") or {}
+        logging_cfg = (cfg.get("training") or {}).get("logging") or {}
+
+        # Union of eval.metrics + logging.train_metrics + logging.test_metrics
+        # so one resolved pool backs every downstream Evaluator.
+        metric_names: list[str] = list(eval_config.get("metrics") or ["accuracy"])
+        for extra_key in ("train_metrics", "test_metrics"):
+            for name in logging_cfg.get(extra_key) or []:
+                if name not in metric_names:
+                    metric_names.append(name)
+
         funcs: dict[str, Any] = {}
         for mname in metric_names:
             resolution = None
@@ -911,18 +921,50 @@ def _train_and_evaluate(
                 sched_config["name"], optimizer, sched_config.get("params", {})
             )
 
-    logging_cfg = training_config.get("logging")
+    logging_cfg = training_config.get("logging") or {}
     training_logger = None
     log_every_n = 1
-    if isinstance(logging_cfg, dict):
+    log_every_n_steps: int | None = None
+    train_step_filter: list[str] | None = None
+    val_metrics_filter: list[str] | None = None
+    train_metrics_names: list[str] = []
+    test_metrics_names: list[str] = []
+    log_lr = True
+    if isinstance(logging_cfg, dict) and logging_cfg:
         training_logger = create_logger(logging_cfg, fold_dir / "tb_logs")
         log_every_n = int(logging_cfg.get("log_every_n_epochs", 1))
+        log_every_n_steps = logging_cfg.get("log_every_n_steps")
+        train_step_filter = logging_cfg.get("train_step_scalars")
+        val_metrics_filter = logging_cfg.get("val_metrics")
+        train_metrics_names = list(logging_cfg.get("train_metrics") or [])
+        test_metrics_names = list(logging_cfg.get("test_metrics") or [])
+        log_lr = bool(logging_cfg.get("log_lr", True))
         if training_logger is not None and logging_cfg.get("log_graph"):
             try:
                 sample = get_sample_input(train_loader)
                 training_logger.log_graph(model.to(ctx.device), sample.to(ctx.device))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("log_graph failed: %s", exc)
+
+    train_evaluator = (
+        Evaluator({n: ctx.metric_funcs[n] for n in train_metrics_names})
+        if train_metrics_names
+        else None
+    )
+    test_evaluator = (
+        Evaluator({n: ctx.metric_funcs[n] for n in test_metrics_names})
+        if test_metrics_names
+        else None
+    )
+
+    if test_metrics_names:
+        logger.warning(
+            "training.logging.test_metrics is set — tracking test-set metrics "
+            "DURING training creates data-leakage risk via model selection / "
+            "hyperparameter tuning. Prefer val_metrics for monitoring; only "
+            "enable test_metrics for controlled ablation / analysis where you "
+            "accept the risk."
+        )
 
     ckpt_cfg = training_config.get("checkpoint")
     checkpoint_dir = None
@@ -944,6 +986,13 @@ def _train_and_evaluate(
         early_stopping_config=training_config.get("early_stopping"),
         training_logger=training_logger,
         log_every_n_epochs=log_every_n,
+        log_every_n_steps=log_every_n_steps,
+        train_step_filter=train_step_filter,
+        val_metrics_filter=val_metrics_filter,
+        train_evaluator=train_evaluator,
+        test_evaluator=test_evaluator,
+        test_loader=test_loader,
+        log_lr=log_lr,
     )
 
     metrics = {**run_result["best_metrics"]}

@@ -309,8 +309,14 @@ dev6 **自动通道接线**，无需配置。Trainer 接到的 `batch` 键：
 | `checkpoint.mode` | 可选 | string | `max`（默认）或 `min` |
 | `checkpoint.dir` | 可选 | string | 自定义 checkpoint 目录 |
 | `logging.backend` | 可选 | string | 仅允许 `tensorboard`（R17） |
-| `logging.log_every_n_epochs` | 可选 | int | 正整数（R18），默认 1 |
-| `logging.log_graph` | 可选 | bool | 是否记录模型计算图，默认 `false` |
+| `logging.log_every_n_epochs` | 可选 | int | 正整数（R18），默认 1。epoch 级写入频率 |
+| `logging.log_every_n_steps` | 可选 | int | 正整数（R18a），默认 `null`。声明后每 N 个 batch 写入一次 step 级标量（tag 前缀 `step/`）；关闭则不写 step 级 |
+| `logging.log_graph` | 可选 | bool | 是否记录模型计算图（R17b），默认 `false` |
+| `logging.log_lr` | 可选 | bool | 是否记录学习率（R17c），默认 `true`。同时作用于 epoch 级 `lr` 与 step 级 `step/lr` |
+| `logging.train_step_scalars` | 可选 | list[str] | 白名单（R35）；筛选 `training_step` 返回的数值标量，未声明时记录全部。tag 为原始 key（epoch 级）或 `step/<name>`（step 级） |
+| `logging.train_metrics` | 可选 | list[str] | 训练集 computed 指标列表（R36），默认 `[]` 表示不计算。声明后框架用训练集 preds/targets 计算指定指标并以 `train_<name>` 写入；**要求 Trainer 的 `training_step` 返回 `preds` / `targets`**，否则框架 WARN 并跳过 |
+| `logging.val_metrics` | 可选 | list[str] | 验证集白名单（R37）；必须是 `evaluation.metrics` 的子集。tag 为 `val_<name>`；未声明时记录 `evaluation.metrics` 全部 |
+| `logging.test_metrics` | 可选 | list[str] | 测试集 computed 指标列表（R38），默认 `[]` 表示不计算。声明后框架每 `log_every_n_epochs` 执行一次测试集评估并以 `test_<name>` 写入 TB；**触发数据泄露风险 WARN**，详见设计文档 §9.13 |
 
 > **R24**：`uda.adaptation: transductive` 时 `early_stopping` 与 `checkpoint` 不可出现。
 

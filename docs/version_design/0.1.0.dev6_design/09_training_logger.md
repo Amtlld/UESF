@@ -20,15 +20,24 @@ training:
   logging:                          # 可选，省略则不记录训练日志
     backend: tensorboard            # 日志后端，目前仅支持 tensorboard
     log_every_n_epochs: 1           # 每 N 个 epoch 记录一次，默认 1
+    log_every_n_steps: null         # 每 N 个 batch 记录一次 step 级标量；null/省略 = 关闭
     log_graph: false                # 是否记录模型计算图，默认 false
+    log_lr: true                    # 是否记录学习率（step 级与 epoch 级均受控），默认 true
+    train_step_scalars: null        # list[str] 白名单，筛选 training_step 返回的标量；null = 记录全部
+    train_metrics: []               # list[str]，在训练集 preds/targets 上用 Evaluator 计算（opt-in）
+    val_metrics: null               # list[str]，必须是 evaluation.metrics 子集；null = 记录全部
+    test_metrics: []                # list[str]，在测试集上计算（opt-in，触发数据泄露 warning）
 ```
 
 **设计说明**：
 
 - `backend` 目前仅支持 `tensorboard`，为未来扩展预留字段
-- `log_every_n_epochs` 控制写入频率，避免大量 epoch 时日志膨胀
+- `log_every_n_epochs` 控制 epoch 级写入频率，避免大量 epoch 时日志膨胀
+- `log_every_n_steps` 控制 step 级（batch 级）写入频率，便于观察细粒度 loss / lr 波动；未声明默认关闭
 - `log_graph` 默认关闭——计算图写入需要 trace 一次前向传播，可能与某些动态模型不兼容
 - 不暴露 `logdir`：由框架根据 `output_dir` 自动生成，保证目录结构一致性
+- `train_metrics`、`test_metrics` 的指标名走与 `evaluation.metrics` 相同的 `MetricManager` 解析链（内置 → 注册 REGISTERED → 全局 GLOBAL），所以**自定义指标**可以直接复用
+- 新字段全部可选，未声明时行为与 dev6 早期版本完全一致（向后兼容）
 
 ## 9.3 TrainingLogger 协议与实现
 
@@ -189,15 +198,19 @@ class Runner:
 
 ## 9.5 记录的指标
 
-Runner 自动记录以下指标，无需用户手动配置：
+Runner 默认记录下表中的指标，不声明任何新字段时与 dev6 早期行为一致：
 
-| 类别 | 指标 | 来源 | TensorBoard tag |
-|:-----|:-----|:-----|:----------------|
-| 训练 | `training_step` 返回的所有标量 | `train_epoch()` 每 epoch 均值 | `loss`, `domain_loss` 等（原始 key） |
-| 验证 | Evaluator 计算的所有指标 | `validate_epoch()` | `val_accuracy`, `val_f1_score` 等 |
-| 学习率 | 当前学习率 | `optimizer.param_groups[0]["lr"]` | `lr` |
+| 类别 | 来源 | TensorBoard tag | step 坐标 | 默认启用 |
+|:-----|:-----|:----------------|:---------|:---------|
+| 训练 step 标量（epoch 平均） | `train_epoch()` aggregate from `training_step` | `<name>`（`loss`、`domain_loss` 等） | `epoch` | ✅ |
+| 训练 computed 指标 | 训练集 preds/targets → `train_metrics` Evaluator | `train_<name>` | `epoch` | ❌（需声明 `train_metrics`） |
+| 验证 computed 指标 | `validate_epoch()` → `evaluation.metrics` Evaluator | `val_<name>`（`val_accuracy` 等），经 `val_metrics` 过滤 | `epoch` | ✅ |
+| 测试 computed 指标 | `test_loader` → `test_metrics` Evaluator | `test_<name>` | `epoch` | ❌（需声明 `test_metrics`，附带数据泄露 WARN） |
+| 学习率 | `optimizer.param_groups[0]["lr"]` | `lr` | `epoch` | ✅（`log_lr` 可关） |
+| Step 级训练标量 | `training_step` 返回的数值标量（经 `train_step_scalars` 过滤） | `step/<name>`（`step/loss` 等） | 全局 step = `epoch * len(train_loader) + batch_idx` | ❌（需声明 `log_every_n_steps`） |
+| Step 级学习率 | 同上 | `step/lr` | 全局 step | ❌（需声明 `log_every_n_steps`；`log_lr` 可关） |
 
-**UDA 模式说明**：UDA Trainer 的 `training_step` 通常返回 `{"loss": ..., "source_cls_loss": ..., "domain_loss": ...}` 等多个标量。Runner 对这些标量一视同仁地记录，无需为 UDA 做特殊处理——指标的丰富度由 Trainer 实现决定，Logger 层透明传递。
+**UDA 模式说明**：UDA Trainer 的 `training_step` 通常返回 `{"loss": ..., "source_cls_loss": ..., "domain_loss": ...}` 等多个标量。Runner 对这些标量一视同仁地记录，无需为 UDA 做特殊处理——指标的丰富度由 Trainer 实现决定，Logger 层透明传递。使用 `train_step_scalars` 可以在 TB 中只保留感兴趣的子集。
 
 ## 9.6 多 fold 日志目录结构
 
@@ -296,3 +309,88 @@ def create_logger(config: dict, log_dir: Path) -> TrainingLogger | None:
                 hint="Install with: uv pip install uesf[tensorboard]",
             )
 ```
+
+## 9.10 Step 级写入
+
+`log_every_n_steps`（默认 `null`）启用后，Runner 在 `train_epoch` 内部每 N 个 batch 向
+TensorBoard 写入一条记录，step 坐标为**全局 step** = `epoch * len(train_loader) + batch_idx`。
+Tag 统一加 `step/` 前缀，与 epoch 级 tag 命名空间隔离：
+
+| 来源 | tag | step 坐标 |
+|------|-----|-----------|
+| `training_step` 返回的每个数值标量（经 `train_step_scalars` 过滤） | `step/<name>` | 全局 step |
+| 学习率（`log_lr=true` 时） | `step/lr` | 全局 step |
+
+**写入条件**：`training_logger is not None and log_every_n_steps and (global_step + 1) % log_every_n_steps == 0`。
+触发后，Runner 从当前 `step_result` 中提取数值标量、应用 `train_step_scalars` 白名单后
+写入。step 级写入独立于 `log_every_n_epochs`——即使 epoch 级写入被跳过的 epoch，step 级
+仍然按 N-batch 节奏进行。
+
+**典型用法**：训练集规模较大、loss 波动剧烈时启用 `log_every_n_steps` 可得到更细的 loss
+曲线；epoch 级则用于 aggregated / val / test 指标。
+
+## 9.11 指标白名单（filter）
+
+Runner 默认把 `training_step` 返回的全部数值标量 ∪ `evaluation.metrics` 计算出的全部
+验证指标 ∪ `lr` 一并写入 TB。dev6+ 用户可以通过三条过滤策略收敛 tag 集合：
+
+| 字段 | 作用对象 | 默认 | 语义 |
+|------|---------|------|------|
+| `train_step_scalars` | `training_step` 返回的数值标量（epoch 平均 + step 级） | `null` = 全部 | 白名单：仅出现在列表中的 key 被写入 TB（tag 保持原名，不加 `train_` 前缀） |
+| `val_metrics` | `evaluation.metrics` 中计算出的验证指标 | `null` = 全部 | 白名单：仅出现在列表中的**裸名**对应的 `val_<name>` 会写入 TB；**必须是 `evaluation.metrics` 的子集**（R37） |
+| `log_lr` | `lr` 与 `step/lr` | `true` | 布尔开关；`false` 时完全不写 lr |
+
+**过滤对 Evaluator 计算的影响**：`val_metrics` 只影响 TB 写入，不影响 Evaluator
+计算——`evaluation.metrics` 仍然全部计算（checkpoint / early_stopping / 最终报告依赖）。
+
+## 9.12 训练集 computed 指标（train_metrics）
+
+声明 `training.logging.train_metrics` 后，Runner 在每 epoch 结束时用一个独立的
+Evaluator 对**训练集** preds/targets 计算指定指标，以 `train_<name>` 的 tag 写入 TB。
+Runner 不做额外的 no-grad 前向，而是复用 `training_step` 的前向结果——**要求 Trainer
+的 `training_step` 在返回 dict 中额外带上**：
+
+- `"preds"`: `torch.Tensor`（logits 或类索引；与 `validation_step` 一致）
+- `"targets"`: `torch.Tensor`
+
+Runner 在 `train_epoch` 内部通过 `step_result.get("preds")` / `.get("targets")` 收集；
+为避免多余的 CPU 拷贝，**仅在 `train_evaluator` 非空时才收集**（opt-in）。
+
+**缺失字段时的降级行为**：若 `train_metrics` 已配置但 `training_step` 没有返回
+`preds` / `targets`，Runner 在首个 epoch 结束时发出 WARN 并静默跳过训练集指标计算，
+其他 TB 写入不受影响：
+
+```
+training.logging.train_metrics is configured but training_step did not return
+'preds'/'targets' — skipping train-side metric computation. Update your Trainer
+to return these tensors to enable train metrics.
+```
+
+**成本**：只是把 `training_step` 已经算出的 logits 额外 `.detach().cpu()` 一次并存到
+`Runner._train_preds`。相对完整 no-grad 训练集评估 pass 省掉一次前向，开销可忽略。
+
+## 9.13 测试集 computed 指标（test_metrics）与数据泄露风险
+
+声明 `training.logging.test_metrics` 后，Runner 每 `log_every_n_epochs` 对
+`test_loader` 做一次 no-grad 评估 pass（复用 `trainer.validation_step`），用独立的
+test Evaluator 计算指定指标并以 `test_<name>` 写入 TB。
+
+**强制性 WARN**：`ExperimentExecutor` 在读取到非空 `test_metrics` 时立即发出一条
+WARN——这**不是**阻断式校验，用户可以选择继续执行，但框架要求显式记录：
+
+```
+training.logging.test_metrics is set — tracking test-set metrics DURING
+training creates data-leakage risk via model selection / hyperparameter
+tuning. Prefer val_metrics for monitoring; only enable test_metrics for
+controlled ablation / analysis where you accept the risk.
+```
+
+**为什么警告**：训练过程中观测测试集曲线会把测试集信息泄露到模型选择 / 超参调整
+环节——即便不直接用 test 指标做 early_stopping / checkpoint，研究人员也会基于曲线
+隐式调优，导致最终报告的 test 指标乐观偏差。UESF 默认假设 `evaluation.metrics` 的
+最终 test 评估仅在训练结束后执行一次（现状保留），`test_metrics` 只用于**事后分析
+/ 消融研究 / 教学演示**等接受风险的场景。
+
+**与最终 test 评估的关系**：训练结束后，`ExperimentExecutor` 仍然按 dev6 行为在测试集
+上运行一次完整 `evaluation.metrics` 评估并写入 `fold_results` / 最终报告——
+`test_metrics` 只新增训练过程中的 TB 追踪，不影响最终报告的内容。

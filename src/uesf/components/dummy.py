@@ -40,6 +40,8 @@ class DummyTrainer(BaseTrainer):
     ) -> dict[str, Any]:
         total_loss = 0.0
         n = 0
+        all_preds: list[torch.Tensor] = []
+        all_targets: list[torch.Tensor] = []
         for channel_name, (data, labels) in batch.items():
             data = data.to(self.device)
             labels = labels.to(self.device)
@@ -50,7 +52,13 @@ class DummyTrainer(BaseTrainer):
             optimizer.step()
             total_loss += loss.item()
             n += 1
-        return {"loss": total_loss / max(n, 1)}
+            all_preds.append(output.detach().argmax(dim=1))
+            all_targets.append(labels.detach())
+        return {
+            "loss": total_loss / max(n, 1),
+            "preds": torch.cat(all_preds) if all_preds else None,
+            "targets": torch.cat(all_targets) if all_targets else None,
+        }
 
     def validation_step(
         self,

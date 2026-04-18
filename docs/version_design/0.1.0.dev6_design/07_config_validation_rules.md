@@ -19,7 +19,10 @@
 | R15 | val_ratio 值域 | `0 <= val_ratio < 1`；k-fold 换算后 `val_ratio_in_train < 1` |
 | R16 | 单数据集 alignment 处理 | `len(datasets) == 1` 时若存在 `alignment` 块，忽略并发出 warning |
 | R17 | logging.backend 合法值 | `training.logging.backend` 仅允许 `"tensorboard"`，其他值抛出 `TypeMismatchError` |
+| R17b | log_graph 类型 | `training.logging.log_graph`（若声明）必须为 `bool`，否则抛出 `TypeMismatchError` |
+| R17c | log_lr 类型 | `training.logging.log_lr`（若声明）必须为 `bool`，否则抛出 `TypeMismatchError` |
 | R18 | log_every_n_epochs 正整数 | `training.logging.log_every_n_epochs` 必须为正整数（> 0），否则抛出 `TypeMismatchError` |
+| R18a | log_every_n_steps 正整数 | `training.logging.log_every_n_steps`（若声明）必须为正整数（> 0）。未声明 / 为 `null` 时关闭 step 级日志 |
 | R19 | val_split 与 val_ratio 互斥 | `split.val_split` 存在时，`split.val_ratio` 不可出现；反之亦然 |
 | R20 | dataset 维度必须用 val_split | `split.dimension=dataset` 时，若需要验证集则必须使用 `val_split`，不可使用主划分的 `val_ratio` |
 | R21 | val_split.val_ratio 值域 | `0 < val_split.val_ratio < 1`（val_split 存在时 val_ratio 必须 > 0，否则不应配置 val_split） |
@@ -32,6 +35,10 @@
 | R28 | DomainPartition 维度白名单 | `uda.domain.dimension` 仅允许 `dataset | subject | session`。当前版本不支持 `recording`（跨 recording 域偏移小，UDA 意义有限）和 `flatten`（与域划分的隔离语义冲突）。其他值抛出 `TypeMismatchError` |
 | R29 | 跨数据集 transforms 管线一致 | 多数据集场景（`split.dimension=dataset` 或 `uda.domain.dimension=dataset`）下，参与同一次 `apply_transforms`/`apply_transforms_uda` 调用的各 alias，其 `transforms` 列表必须**长度相同**，且**相同位置的 `name` 与 `scope` 完全一致**。否则无法在步骤级按 scope 分发。校验由 `ConfigValidator.validate()` 在规范化后执行；不一致时抛出 `ConfigError` |
 | R30 | val_split 维度偏序约束 | 当 Regular 主 `split.dimension` ∈ `{subject, session, recording}` 时，`val_split.dimension` 可为任意 `subject | session | recording | flatten`（训练子集沿主维度切片后仍为干净 5D，`ValSplitter` 可直接 `get_groups`）；当主 `split.dimension=flatten` 时，`val_split.dimension` 必须也为 `flatten`——flatten 切分后训练子集不再保持 5D 结构，无法在其他维度上分组。其他组合抛出 `ConfigError` |
+| R35 | train_step_scalars 类型 | `training.logging.train_step_scalars`（若声明）必须为**非空字符串**的 list。用于在 TensorBoard 中筛选 `training_step` 返回 dict 的标量 key；未声明 / 为 `null` 时记录所有数值标量 |
+| R36 | train_metrics 类型 | `training.logging.train_metrics`（若声明）必须为**非空字符串**的 list。声明后框架将在训练集 preds/targets 上用 Evaluator 计算对应指标并以 `train_<name>` 写入 TensorBoard；Trainer 的 `training_step` 需返回 `preds` 与 `targets` 才能生效 |
+| R37 | val_metrics 为 evaluation.metrics 子集 | `training.logging.val_metrics`（若声明）必须为**非空字符串**的 list，且所有元素必须出现在 `evaluation.metrics` 中（因此 `evaluation.metrics` 必须已声明）。未声明 / 为 `null` 时记录 `evaluation.metrics` 全部 |
+| R38 | test_metrics 类型 | `training.logging.test_metrics`（若声明）必须为**非空字符串**的 list。声明后框架每 `log_every_n_epochs` 在测试集上运行一次评估并以 `test_<name>` 写入 TensorBoard；触发数据泄露风险 warning，详见 [09_training_logger.md §9.13](09_training_logger.md) |
 
 ---
 

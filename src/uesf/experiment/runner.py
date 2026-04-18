@@ -93,6 +93,17 @@ class Runner:
         self.epochs = config.get("epochs", 10)
         self.gradient_clip = config.get("gradient_clip")
 
+        # Per-run logging context — overridden in run(); defaulted here so
+        # train_epoch() can be called in isolation (tests) without errors.
+        self._training_logger: TrainingLogger | None = None
+        self._log_every_n_steps: int | None = None
+        self._train_step_filter: list[str] | None = None
+        self._log_lr: bool = True
+        self._train_evaluator: Any | None = None
+        self._train_preds: list[torch.Tensor] = []
+        self._train_targets: list[torch.Tensor] = []
+        self._train_missing_pred_count: int = 0
+
     def train_epoch(
         self,
         train_loader: Any,
@@ -108,12 +119,10 @@ class Runner:
         epoch_metrics: dict[str, list[float]] = {}
 
         for batch_idx, batch in enumerate(train_loader):
-            # Move data to device
             batch = _move_batch_to_device(batch, self.device)
 
             step_result = self.trainer.training_step(batch, batch_idx, optimizer)
 
-            # Gradient clipping (after backward, before optimizer.step happens in trainer)
             if self.gradient_clip:
                 max_norm = self.gradient_clip.get("max_norm", 1.0)
                 norm_type = self.gradient_clip.get("norm_type", 2)
@@ -127,7 +136,33 @@ class Runner:
                 if isinstance(value, (int, float)):
                     epoch_metrics.setdefault(key, []).append(value)
 
-        # Average training metrics
+            if self._train_evaluator is not None:
+                preds = step_result.get("preds")
+                targets = step_result.get("targets")
+                if isinstance(preds, torch.Tensor) and isinstance(targets, torch.Tensor):
+                    self._train_preds.append(preds.detach().cpu())
+                    self._train_targets.append(targets.detach().cpu())
+                else:
+                    self._train_missing_pred_count += 1
+
+            if self._training_logger is not None and self._log_every_n_steps:
+                global_step = epoch * len(train_loader) + batch_idx
+                if (global_step + 1) % self._log_every_n_steps == 0:
+                    step_scalars: dict[str, float] = {}
+                    for key, value in step_result.items():
+                        if isinstance(value, (int, float)) and _keep(
+                            key, self._train_step_filter
+                        ):
+                            step_scalars[f"step/{key}"] = float(value)
+                    if self._log_lr:
+                        step_scalars["step/lr"] = float(
+                            optimizer.param_groups[0]["lr"]
+                        )
+                    if step_scalars:
+                        self._training_logger.log_scalars(
+                            step_scalars, step=global_step
+                        )
+
         return {k: sum(v) / len(v) for k, v in epoch_metrics.items()}
 
     @torch.no_grad()
@@ -167,13 +202,36 @@ class Runner:
         early_stopping_config: dict[str, Any] | None = None,
         training_logger: TrainingLogger | None = None,
         log_every_n_epochs: int = 1,
+        log_every_n_steps: int | None = None,
+        train_step_filter: list[str] | None = None,
+        val_metrics_filter: list[str] | None = None,
+        train_evaluator: Any | None = None,
+        test_evaluator: Any | None = None,
+        test_loader: Any | None = None,
+        log_lr: bool = True,
     ) -> dict[str, Any]:
         """Run the full training loop.
 
         Args:
             training_logger: Optional :class:`TrainingLogger`; wrapped in a
                 context manager so ``close()`` still runs on exception.
-            log_every_n_epochs: Log cadence when ``training_logger`` is given.
+            log_every_n_epochs: Epoch-level logging cadence.
+            log_every_n_steps: Step-level (per-batch) logging cadence; ``None``
+                disables step-level writes.
+            train_step_filter: Whitelist of ``training_step`` return keys; when
+                given, only matching scalars are written (both step- and
+                epoch-level). ``None`` keeps every numeric scalar.
+            val_metrics_filter: Whitelist (bare names) over
+                ``evaluation.metrics``; ``None`` keeps all.
+            train_evaluator: Optional :class:`Evaluator` computed on training
+                ``preds``/``targets`` collected from ``training_step``. Tags
+                are ``train_<name>``.
+            test_evaluator: Optional :class:`Evaluator` computed on
+                ``test_loader`` each ``log_every_n_epochs``. Tags are
+                ``test_<name>``. Caller is responsible for warning about
+                data-leakage risk before invoking.
+            test_loader: DataLoader used only when ``test_evaluator`` is set.
+            log_lr: Whether to write learning rate scalars.
 
         Returns:
             Dict with training history and best metrics.
@@ -190,16 +248,55 @@ class Runner:
         best_metrics: dict[str, Any] = {}
         history: list[dict[str, Any]] = []
 
+        self._training_logger = training_logger
+        self._log_every_n_steps = log_every_n_steps
+        self._train_step_filter = train_step_filter
+        self._log_lr = log_lr
+        self._train_evaluator = train_evaluator
+
         logger_cm = training_logger if training_logger is not None else contextlib.nullcontext()
 
         with logger_cm:
             for epoch in range(self.epochs):
+                self._train_preds = []
+                self._train_targets = []
+                self._train_missing_pred_count = 0
+
                 train_metrics = self.train_epoch(train_loader, optimizer, epoch)
 
                 val_metrics: dict[str, Any] = {}
                 if val_loader and len(val_loader) > 0:
                     val_metrics, _, _ = self.validate_epoch(val_loader)
                     val_metrics = {f"val_{k}": v for k, v in val_metrics.items()}
+
+                train_computed: dict[str, Any] = {}
+                if train_evaluator is not None:
+                    if self._train_preds and self._train_targets:
+                        raw_train = train_evaluator.compute_epoch_metrics(
+                            self._train_preds, self._train_targets
+                        )
+                        train_computed = {f"train_{k}": v for k, v in raw_train.items()}
+                    elif epoch == 0 and self._train_missing_pred_count > 0:
+                        logger.warning(
+                            "training.logging.train_metrics is configured but "
+                            "training_step did not return 'preds'/'targets' — "
+                            "skipping train-side metric computation. Update your "
+                            "Trainer to return these tensors to enable train metrics."
+                        )
+
+                should_epoch_log = (epoch + 1) % log_every_n_epochs == 0
+
+                test_computed: dict[str, Any] = {}
+                if (
+                    test_evaluator is not None
+                    and test_loader is not None
+                    and len(test_loader) > 0
+                    and should_epoch_log
+                ):
+                    raw_test, _, _ = self._evaluate_on_loader(
+                        test_loader, test_evaluator
+                    )
+                    test_computed = {f"test_{k}": v for k, v in raw_test.items()}
 
                 if scheduler is not None:
                     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -214,7 +311,13 @@ class Runner:
                     else:
                         scheduler.step()
 
-                epoch_result = {**train_metrics, **val_metrics, "epoch": epoch}
+                epoch_result = {
+                    **train_metrics,
+                    **train_computed,
+                    **val_metrics,
+                    **test_computed,
+                    "epoch": epoch,
+                }
                 history.append(epoch_result)
 
                 logger.info(
@@ -224,15 +327,24 @@ class Runner:
                     _format_metrics(epoch_result),
                 )
 
-                if training_logger is not None and ((epoch + 1) % log_every_n_epochs == 0):
+                if training_logger is not None and should_epoch_log:
                     scalars: dict[str, float] = {}
                     for k, v in train_metrics.items():
+                        if isinstance(v, (int, float)) and _keep(k, train_step_filter):
+                            scalars[k] = float(v)
+                    for k, v in train_computed.items():
                         if isinstance(v, (int, float)):
                             scalars[k] = float(v)
                     for k, v in val_metrics.items():
                         if isinstance(v, (int, float)):
+                            bare = k[4:] if k.startswith("val_") else k
+                            if _keep(bare, val_metrics_filter):
+                                scalars[k] = float(v)
+                    for k, v in test_computed.items():
+                        if isinstance(v, (int, float)):
                             scalars[k] = float(v)
-                    scalars["lr"] = float(optimizer.param_groups[0]["lr"])
+                    if log_lr:
+                        scalars["lr"] = float(optimizer.param_groups[0]["lr"])
                     training_logger.log_scalars(scalars, step=epoch)
 
                 if checkpoint_dir and checkpoint_metric and checkpoint_metric in val_metrics:
@@ -268,6 +380,31 @@ class Runner:
             "epochs_run": len(history),
         }
 
+    @torch.no_grad()
+    def _evaluate_on_loader(
+        self,
+        loader: Any,
+        evaluator: Any,
+    ) -> tuple[dict[str, Any], list[torch.Tensor], list[torch.Tensor]]:
+        """Run an eval pass on ``loader`` with a caller-supplied evaluator.
+
+        Mirrors :meth:`validate_epoch` but lets the caller swap evaluators —
+        useful for computing a different metric subset on the test set during
+        training.
+        """
+        self.trainer.model.eval()
+        preds_list: list[torch.Tensor] = []
+        targets_list: list[torch.Tensor] = []
+        for batch_idx, batch in enumerate(loader):
+            batch = _move_batch_to_device(batch, self.device)
+            step_result = self.trainer.validation_step(batch, batch_idx)
+            if "preds" in step_result and step_result["preds"] is not None:
+                preds_list.append(step_result["preds"].detach().cpu())
+            if "targets" in step_result and step_result["targets"] is not None:
+                targets_list.append(step_result["targets"].detach().cpu())
+        metrics = evaluator.compute_epoch_metrics(preds_list, targets_list)
+        return metrics, preds_list, targets_list
+
 
 def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
     """Move a multi-channel batch dict to the target device."""
@@ -275,6 +412,11 @@ def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
     for name, (data, labels) in batch.items():
         moved[name] = (data.to(device), labels.to(device))
     return moved
+
+
+def _keep(name: str, whitelist: list[str] | None) -> bool:
+    """``None`` whitelist lets everything through; otherwise membership check."""
+    return whitelist is None or name in whitelist
 
 
 def _format_metrics(metrics: dict[str, Any]) -> str:

@@ -584,9 +584,66 @@ def _validate_training(config: dict, mode: str) -> None:
             )
         freq = logging_block.get("log_every_n_epochs")
         if freq is not None:
-            if not isinstance(freq, int) or freq <= 0:
+            if isinstance(freq, bool) or not isinstance(freq, int) or freq <= 0:
                 raise TypeMismatchError(
                     f"training.logging.log_every_n_epochs must be a positive int, got {freq!r} (R18).",
+                )
+
+        step_freq = logging_block.get("log_every_n_steps")
+        if step_freq is not None:
+            if (
+                isinstance(step_freq, bool)
+                or not isinstance(step_freq, int)
+                or step_freq <= 0
+            ):
+                raise TypeMismatchError(
+                    f"training.logging.log_every_n_steps must be a positive int, got {step_freq!r} (R18a).",
+                )
+
+        log_graph = logging_block.get("log_graph")
+        if log_graph is not None and not isinstance(log_graph, bool):
+            raise TypeMismatchError(
+                f"training.logging.log_graph must be a bool, got {type(log_graph).__name__} (R17b).",
+            )
+
+        log_lr = logging_block.get("log_lr")
+        if log_lr is not None and not isinstance(log_lr, bool):
+            raise TypeMismatchError(
+                f"training.logging.log_lr must be a bool, got {type(log_lr).__name__} (R17c).",
+            )
+
+        _validate_metric_name_list(
+            logging_block.get("train_step_scalars"),
+            "training.logging.train_step_scalars",
+            "R35",
+        )
+        _validate_metric_name_list(
+            logging_block.get("train_metrics"),
+            "training.logging.train_metrics",
+            "R36",
+        )
+        _validate_metric_name_list(
+            logging_block.get("test_metrics"),
+            "training.logging.test_metrics",
+            "R38",
+        )
+
+        val_metrics = logging_block.get("val_metrics")
+        if val_metrics is not None:
+            _validate_metric_name_list(
+                val_metrics, "training.logging.val_metrics", "R37"
+            )
+            eval_block = config.get("evaluation") or {}
+            eval_metrics = eval_block.get("metrics")
+            if not eval_metrics:
+                raise ConfigError(
+                    "training.logging.val_metrics requires evaluation.metrics to be declared (R37).",
+                )
+            missing = [m for m in val_metrics if m not in eval_metrics]
+            if missing:
+                raise ConfigError(
+                    "training.logging.val_metrics contains names not in evaluation.metrics "
+                    f"(R37): {missing}. Declared evaluation.metrics: {list(eval_metrics)}.",
                 )
 
     # R24
@@ -601,3 +658,18 @@ def _validate_training(config: dict, mode: str) -> None:
                 raise ConfigError(
                     "training.checkpoint not allowed for transductive UDA (R24).",
                 )
+
+
+def _validate_metric_name_list(value, field_name: str, rule: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise TypeMismatchError(
+            f"{field_name} must be a list of non-empty strings ({rule}), "
+            f"got {type(value).__name__}.",
+        )
+    for i, name in enumerate(value):
+        if not isinstance(name, str) or not name:
+            raise TypeMismatchError(
+                f"{field_name}[{i}] must be a non-empty string ({rule}), got {name!r}.",
+            )

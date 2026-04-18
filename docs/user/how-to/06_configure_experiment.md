@@ -306,14 +306,79 @@ checkpoint:
 
 ### 训练日志（logging，可选）
 
+最小配置（仅启用后端，其他字段走默认）：
+
 ```yaml
 logging:
   backend: tensorboard         # 当前仅支持 tensorboard（R17）
-  log_every_n_epochs: 1        # 正整数（R18）
+  log_every_n_epochs: 1        # 正整数（R18），epoch 级写入频率
   log_graph: false             # 是否记录模型计算图（默认 false）
 ```
 
-> **依赖**：启用 `tensorboard` 后端需安装可选依赖 `uv pip install uesf[tensorboard]`。每个 fold 独立写入 `experiments/results/<exp>/fold_<i>/tb_logs/`，`tensorboard --logdir experiments/results/<exp>` 可一次查看所有 fold 曲线。
+完整字段一览（全部可选；未声明的字段保持 dev6 早期默认行为）：
+
+```yaml
+logging:
+  backend: tensorboard
+  log_every_n_epochs: 1
+  log_every_n_steps: 10            # 每 10 个 batch 写一次 step 级标量（tag 前缀 step/）；省略 = 关闭
+  log_graph: false
+  log_lr: true                     # 是否写学习率（epoch 级 lr 与 step 级 step/lr）
+
+  # 训练集（两类独立配置）
+  train_step_scalars: [loss]       # 白名单筛选 training_step 返回的标量；省略 = 记录全部
+  train_metrics: [accuracy]        # 需 Trainer 的 training_step 返回 preds/targets（opt-in）
+
+  # 验证集（evaluation.metrics 的子集白名单）
+  val_metrics: [accuracy]          # 必须是 evaluation.metrics 的子集（R37）；省略 = 记录全部
+
+  # 测试集（opt-in；触发数据泄露 WARN）
+  test_metrics: [accuracy]         # 每 log_every_n_epochs 在测试集上运行一次评估
+```
+
+**TensorBoard tag 命名**：
+
+| 来源 | tag | step 轴 |
+|------|-----|---------|
+| `training_step` 标量（epoch 平均） | `<name>`（如 `loss`） | epoch |
+| 训练集 computed 指标（`train_metrics`） | `train_<name>` | epoch |
+| 验证集 computed 指标（`evaluation.metrics`，经 `val_metrics` 过滤） | `val_<name>` | epoch |
+| 测试集 computed 指标（`test_metrics`） | `test_<name>` | epoch |
+| 学习率 | `lr` | epoch |
+| Step 级训练标量 / lr | `step/<name>`、`step/lr` | 全局 step |
+
+**Trainer preds/targets 返回约定**（用于 `train_metrics`）：
+
+```python
+class MyTrainer(BaseTrainer):
+    def training_step(self, batch, batch_idx, optimizer):
+        data, labels = batch["main"]
+        logits = self.model(data)
+        loss = criterion(logits, labels)
+        optimizer.zero_grad(); loss.backward(); optimizer.step()
+        return {
+            "loss": loss.item(),
+            "preds": logits.detach().argmax(dim=1),   # 或保留 logits 交给 metric 自行 argmax
+            "targets": labels.detach(),
+        }
+```
+
+如果 `training.logging.train_metrics` 已声明但 `training_step` 没有返回 `preds`/`targets`，
+框架会 WARN 并静默跳过训练集指标（不阻断训练）。
+
+**自定义指标**：`train_metrics` / `val_metrics` / `test_metrics` 中都可以使用
+`project.yml` 中 `metrics:` 注册的项目级指标、或 `uesf metric add` 添加的全局指标——
+指标名解析链复用 `evaluation.metrics` 的逻辑，无需额外配置。
+
+> **依赖**：启用 `tensorboard` 后端需安装可选依赖 `uv pip install uesf[tensorboard]`。
+> 每个 fold 独立写入 `experiments/results/<exp>/fold_<i>/tb_logs/`，
+> `tensorboard --logdir experiments/results/<exp>` 可一次查看所有 fold 曲线。
+
+> **数据泄露风险（test_metrics）**：训练过程中观察测试集曲线会把测试集信息泄露到
+> 模型选择 / 超参调整环节，即便不做 early_stopping / checkpoint，研究人员也会基于
+> 曲线隐式调优，导致最终报告的 test 指标乐观偏差。声明 `test_metrics` 时框架必然
+> 发出一条 WARN——请仅在事后分析 / 消融研究 / 教学演示等接受风险的场景使用，日常
+> 监测请用 `val_metrics`。
 
 > **R24 约束**：`adaptation: transductive` 下 `checkpoint` 与 `early_stopping` 都不可出现（当前版本不支持 transductive 的模型选择指标）。
 

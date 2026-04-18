@@ -533,6 +533,133 @@ class TestLoggingRules:
         }
         ConfigValidator.validate(ConfigValidator.normalize(raw))
 
+    def test_r18a_invalid_log_every_n_steps(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "log_every_n_steps": 0},
+        }
+        with pytest.raises(TypeMismatchError, match="R18a"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r18a_string_rejected(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "log_every_n_steps": "5"},
+        }
+        with pytest.raises(TypeMismatchError, match="R18a"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r18a_valid_positive_int(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "log_every_n_steps": 5},
+        }
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r17b_log_graph_must_be_bool(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "log_graph": "yes"},
+        }
+        with pytest.raises(TypeMismatchError, match="R17b"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r17c_log_lr_must_be_bool(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "log_lr": "on"},
+        }
+        with pytest.raises(TypeMismatchError, match="R17c"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r35_train_step_scalars_must_be_list(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "train_step_scalars": "loss"},
+        }
+        with pytest.raises(TypeMismatchError, match="R35"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r35_empty_string_rejected(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "train_step_scalars": ["loss", ""]},
+        }
+        with pytest.raises(TypeMismatchError, match="R35"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r36_train_metrics_must_be_list(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "train_metrics": "accuracy"},
+        }
+        with pytest.raises(TypeMismatchError, match="R36"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r37_val_metrics_subset_ok(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "val_metrics": ["accuracy"]},
+        }
+        raw["evaluation"] = {"metrics": ["accuracy", "f1_score"]}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r37_val_metrics_not_subset_rejected(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "val_metrics": ["accuracy", "auroc"]},
+        }
+        raw["evaluation"] = {"metrics": ["accuracy", "f1_score"]}
+        with pytest.raises(ConfigError, match="R37"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r37_val_metrics_requires_evaluation_metrics(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "val_metrics": ["accuracy"]},
+        }
+        with pytest.raises(ConfigError, match="R37"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r38_test_metrics_must_be_list(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {"backend": "tensorboard", "test_metrics": "auroc"},
+        }
+        with pytest.raises(TypeMismatchError, match="R38"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_all_new_fields_valid_passes(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "logging": {
+                "backend": "tensorboard",
+                "log_every_n_epochs": 1,
+                "log_every_n_steps": 5,
+                "log_graph": False,
+                "log_lr": True,
+                "train_step_scalars": ["loss"],
+                "train_metrics": ["accuracy"],
+                "val_metrics": ["accuracy"],
+                "test_metrics": ["accuracy"],
+            },
+        }
+        raw["evaluation"] = {"metrics": ["accuracy", "f1_score"]}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
 
 class TestSingleDatasetAlignmentWarning:
     def test_r16_single_dataset_with_alignment_warns(self, caplog):
