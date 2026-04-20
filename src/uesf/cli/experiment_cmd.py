@@ -4,21 +4,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from uesf.cli.app import _format_uesf_error
+from uesf.cli.errors import _format_uesf_error
 from uesf.core.config import ConfigManager
 from uesf.core.database import DatabaseManager
 from uesf.core.exceptions import UESFException
 from uesf.core.logging import setup_logging
-from uesf.managers.experiment_manager import ExperimentManager
-from uesf.managers.metric_manager import MetricManager
-from uesf.managers.model_manager import ModelManager
-from uesf.managers.project_manager import ProjectManager
-from uesf.managers.trainer_manager import TrainerManager
+
+if TYPE_CHECKING:
+    from uesf.managers.experiment_manager import ExperimentManager
 
 console = Console()
 
@@ -30,7 +29,19 @@ experiment_app = typer.Typer(
 
 
 def _get_manager() -> ExperimentManager:
-    """Create and initialize ExperimentManager with all dependencies."""
+    """Create and initialize ExperimentManager with all dependencies.
+
+    Manager modules are imported lazily because ``ExperimentManager``
+    and ``MetricManager`` transitively pull ``torch`` (~0.85 s) and the
+    rest of the experiment pipeline. Deferring keeps non-ML commands
+    (``uesf project info``, ``uesf config show`` …) fast.
+    """
+    from uesf.managers.experiment_manager import ExperimentManager
+    from uesf.managers.metric_manager import MetricManager
+    from uesf.managers.model_manager import ModelManager
+    from uesf.managers.project_manager import ProjectManager
+    from uesf.managers.trainer_manager import TrainerManager
+
     setup_logging()
     db = DatabaseManager()
     db.initialize()

@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from uesf.cli.app import _format_uesf_error
+from uesf.cli.errors import _format_uesf_error
 from uesf.core.config import ConfigManager
 from uesf.core.database import DatabaseManager
 from uesf.core.exceptions import UESFException
 from uesf.core.logging import setup_logging
-from uesf.managers.metric_manager import MetricManager
+
+if TYPE_CHECKING:
+    from uesf.managers.metric_manager import MetricManager
 
 console = Console()
 
@@ -21,7 +24,14 @@ metric_app = typer.Typer(name="metric", help="Manage evaluation metrics.", no_ar
 
 
 def _get_manager() -> MetricManager:
-    """Create and initialize MetricManager."""
+    """Create and initialize MetricManager.
+
+    ``MetricManager`` is imported lazily because it transitively pulls
+    ``torch`` via ``uesf.components.builtin_metrics`` — eagerly loading
+    it at CLI startup would cost ~1 s for every command invocation.
+    """
+    from uesf.managers.metric_manager import MetricManager
+
     setup_logging()
     db = DatabaseManager()
     db.initialize()

@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from uesf.cli.app import _format_uesf_error
+from uesf.cli.errors import _format_uesf_error
 from uesf.core.config import ConfigManager
 from uesf.core.database import DatabaseManager
 from uesf.core.exceptions import UESFException
