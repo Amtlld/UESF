@@ -1,3 +1,3 @@
 """UESF - Universal EEG Study Framework."""
 
-__version__ = "0.1.0.dev7"
+__version__ = "0.1.0.dev8"
