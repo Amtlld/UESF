@@ -239,6 +239,8 @@ def _apply_uda_step_on_alias(
 
     data_5d = dataset_cache[alias]
     original_shape = data_5d.shape
+    # Copy off any read-only mmap backing so the later flat[unique] = ...
+    # partial writes (independent source/target statistics) are allowed.
     flat = _flatten_5d(data_5d).copy()
 
     if len(fit_indices) == 0:

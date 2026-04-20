@@ -437,7 +437,13 @@ class ExperimentManager:
             )
 
         data_dir = Path(row["data_dir_path"])
-        data = np.load(str(data_dir / "eeg_data.npy")).astype(np.float32)
+        # mmap the EEG array so the ~GB-scale tensor lives in OS page cache,
+        # not process RSS; transforms that need RAM-resident data will copy
+        # on demand (see _apply_uda_step_on_alias) or allocate fresh output
+        # arrays (see _apply_step_per_dataset).
+        data = np.load(str(data_dir / "eeg_data.npy"), mmap_mode="r")
+        if data.dtype != np.float32:
+            data = np.asarray(data, dtype=np.float32)
         labels = np.load(str(data_dir / "labels.npy"))
 
         n_ch = data.shape[-2] if data.ndim >= 3 else data.shape[-1]
@@ -1020,7 +1026,11 @@ def _train_and_evaluate(
 
 
 def _snapshot_cache(cache: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    return {k: v.copy() for k, v in cache.items()}
+    # Shallow dict copy — saves array references, not data. transforms never
+    # write to cache[alias] in place; they allocate fresh arrays and rebind
+    # the dict entry (see transforms.py). Restoring via dict reassignment
+    # drops the fold's transformed arrays and reinstates the originals.
+    return dict(cache)
 
 
 def _collect_transforms_regular(config: dict, split_result) -> dict[str, list[dict]]:
