@@ -13,9 +13,13 @@ UESF 提供开箱即用的内置组件，无需注册即可在配置文件中直
 | `filter` | 带通/高通/低通滤波 | `l_freq: float` | 高通截止频率（Hz），`null` 表示不做高通 |
 | | | `h_freq: float` | 低通截止频率（Hz），`null` 表示不做低通 |
 | `notch_filter` | 陷波滤波，去除市电干扰 | `notch_freq: float` | 陷波频率（50 或 60 Hz） |
-| `ica` | 独立成分分析，去眼电/心电伪影 | `method: str` | ICA 算法：`fastica`、`picard` |
-| | | `n_components: float\|int` | 浮点数表示方差解释比例（如 0.95），整数表示成分数量 |
-| | | `exclude_eog_ecg: bool` | 是否自动识别并去除眼电/心电成分 |
+| `ica` | 独立成分分析，去眼电/心电伪影（`mne.preprocessing.ICA` 封装） | `eog_ch_names: list[str]` | 作为 EOG 参考的通道名列表；每个调用一次 `find_bads_eog` |
+| | | `ecg_ch_names: list[str]` | 作为 ECG 参考的通道名列表（可选） |
+| | | `montage: str` | MNE 标准导联布局名（如 `standard_1020`），可选 |
+| | | `figures_dir: str` | Figures 输出目录，绝对或相对 CWD；留空则不生成 |
+| | | `fit_call_kwargs: dict` | 透传给 `ica.fit()`，如 `{decim: 2}`。与 MNE 自身 `fit_params`（ICA 构造参数）不同 |
+| | | `find_bads_kwargs: dict` | 透传给 `find_bads_eog`/`find_bads_ecg` |
+| | | *其它键* | 全部透传给 `mne.preprocessing.ICA()`，如 `method`、`n_components`、`random_state`、`max_iter`、`fit_params`（算法特定配置如 `{extended: true}`）、`noise_cov`、`allow_ref_meg`、`verbose` 等 |
 | `resample` | 频率重采样 | `target_rate: int` | 目标采样率（Hz） |
 | `reference` | 重参考 | `type: str` | 参考方式：`CAR`（公共平均参考）、`mastoid` 等 |
 
@@ -28,7 +32,12 @@ data:
   - name: notch_filter
     params: { notch_freq: 50.0 }
   - name: ica
-    params: { method: fastica, n_components: 0.95, exclude_eog_ecg: true }
+    params:
+      method: picard
+      random_state: 97
+      max_iter: 1000
+      eog_ch_names: [Fp1, Fp2]
+      figures_dir: ./ica_figs
   - name: resample
     params: { target_rate: 128 }
 ```

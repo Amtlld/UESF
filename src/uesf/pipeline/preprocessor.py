@@ -89,6 +89,11 @@ class Preprocessor:
         n_sessions_meta = raw_record["n_sessions"] or 1
         n_recordings_meta = raw_record["n_recordings"] or 1
 
+        # Parse electrode list once — passed to operators via context for ops that
+        # need channel names (e.g., ICA find_bads_eog, bad-channel interpolation).
+        electrode_list_raw = raw_record.get("electrode_list")
+        electrode_list = json.loads(electrode_list_raw) if electrode_list_raw else None
+
         all_data = []
         all_labels = []
 
@@ -116,20 +121,28 @@ class Preprocessor:
                     if n_recordings_meta == 1:
                         subject_labels = subject_labels.squeeze(-1)  # -> (n_sessions,)
 
+                # Build operator context for this subject
+                context = {
+                    "electrode_list": electrode_list,
+                    "subject_id": mat_file.stem,
+                }
+
                 # Apply data stream operators
                 current_sr = sampling_rate
                 for op_config in data_ops:
                     op_name = op_config["name"]
                     op_params = op_config.get("params", {})
                     _, op_fn = get_operator(op_name)
-                    subject_data, current_sr = op_fn(subject_data, current_sr, op_params)
+                    subject_data, current_sr = op_fn(
+                        subject_data, current_sr, op_params, context=context
+                    )
 
                 # Apply label stream operators
                 for op_config in label_ops:
                     op_name = op_config["name"]
                     op_params = op_config.get("params", {})
                     _, op_fn = get_operator(op_name)
-                    subject_labels = op_fn(subject_labels, op_params)
+                    subject_labels = op_fn(subject_labels, op_params, context=context)
 
                 # Apply joint stream operators
                 for op_config in joint_ops:
@@ -137,7 +150,7 @@ class Preprocessor:
                     op_params = op_config.get("params", {})
                     _, op_fn = get_operator(op_name)
                     subject_data, subject_labels, current_sr = op_fn(
-                        subject_data, subject_labels, current_sr, op_params
+                        subject_data, subject_labels, current_sr, op_params, context=context
                     )
 
                 all_data.append(subject_data)

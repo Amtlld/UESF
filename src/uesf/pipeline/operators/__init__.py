@@ -6,6 +6,7 @@ from typing import Callable
 
 from uesf.core.exceptions import ComponentNotFoundError
 from uesf.pipeline.operators.data_ops import bandpass_filter, notch_filter, reference, resample
+from uesf.pipeline.operators.ica import ica
 from uesf.pipeline.operators.joint_ops import epoch_normalize, sliding_window
 from uesf.pipeline.operators.label_ops import smooth
 
@@ -16,6 +17,7 @@ OPERATOR_REGISTRY: dict[str, tuple[str, Callable]] = {
     "filter": ("data", bandpass_filter),
     "notch_filter": ("data", notch_filter),
     "reference": ("data", reference),
+    "ica": ("data", ica),
     "smooth": ("label", smooth),
     "sliding_window": ("joint", sliding_window),
     "epoch_normalize": ("joint", epoch_normalize),

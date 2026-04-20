@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 
-def smooth(labels: np.ndarray, params: dict) -> np.ndarray:
+def smooth(
+    labels: np.ndarray,
+    params: dict,
+    context: dict | None = None,
+) -> np.ndarray:
     """Apply label smoothing with a moving window.
 
     For discrete labels, uses mode within window.
@@ -13,10 +17,12 @@ def smooth(labels: np.ndarray, params: dict) -> np.ndarray:
     Args:
         labels: Label array.
         params: 'window_size' (int).
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         Smoothed labels.
     """
+    del context
     window_size = params.get("window_size", 5)
     if window_size <= 1:
         return labels

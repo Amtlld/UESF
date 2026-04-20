@@ -66,15 +66,29 @@ preprocess:
 
 ### ica — 独立成分分析
 
-去除眼电、心电等伪影。建议在带通滤波**之后**执行：
+去除眼电、心电等伪影。基于 `mne.preprocessing.ICA` 的轻量封装，每个 `(session, recording)` 单独 fit。建议在带通滤波**之后**执行：
 
 ```yaml
 - name: ica
   params:
-    method: fastica       # ICA 算法，支持 "fastica"、"picard"
-    n_components: 0.95    # 保留解释方差比例为 95% 的成分；也可以填整数（如 20）指定成分数
-    exclude_eog_ecg: true # 自动识别并去除眼电/心电成分
+    # --- MNE ICA() 构造参数（完全透传；参见 MNE 文档） ---
+    method: picard          # "picard" / "fastica" / "infomax"
+    n_components: null      # null=全部成分；整数=成分数；浮点=解释方差比
+    random_state: 97
+    max_iter: 1000
+    # --- UESF 特定 ---
+    eog_ch_names: [Fp1, Fp2]    # 作为 EOG 参考的通道名；每个调用一次 find_bads_eog
+    ecg_ch_names: null          # 作为 ECG 参考的通道名（可选）
+    montage: standard_1020      # 可选；设置后 plot_components 才有地形图
+    figures_dir: ./ica_figs     # 可选；绝对路径或相对 CWD；留空则不生成图片
+    fit_call_kwargs: {}         # 透传给 ica.fit()，如 {decim: 2}。注意：与 MNE 自己的 fit_params（ICA 构造参数，用于算法特定配置如 {extended: true}）不是一回事
+    find_bads_kwargs:           # 透传给 find_bads_eog / find_bads_ecg
+      threshold: 3.0
 ```
+
+- **通道名来源**：优先使用 `params.ch_names`，否则从原始数据集的 `electrode_list` 自动注入（推荐在 raw.yml 中填写 `electrode_list`）。
+- **Figures**：当 `figures_dir` 指定时，为每个 EOG/ECG 通道生成 `plot_scores` PNG，以及被排除成分的 `plot_components` PNG，文件名前缀 `{subject_id}_s{session}_r{recording}_...`。
+- **完全暴露 MNE 接口**：`params` 中除上表 UESF 保留键外的所有键均直接透传给 `mne.preprocessing.ICA(**kwargs)`，可配置 `fit_params`、`noise_cov`、`n_pca_components`、`allow_ref_meg`、`verbose` 等任意 MNE 选项。
 
 ### resample — 重采样
 
@@ -161,9 +175,13 @@ preprocess:
         params: { notch_freq: 50.0 }
       - name: ica
         params:
-          method: fastica
-          n_components: 0.95
-          exclude_eog_ecg: true
+          method: picard
+          n_components: null
+          random_state: 97
+          max_iter: 1000
+          eog_ch_names: [Fp1, Fp2]
+          montage: standard_1020
+          figures_dir: ./ica_figs
       - name: resample
         params: { target_rate: 128 }
     joint:

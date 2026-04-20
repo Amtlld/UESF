@@ -12,17 +12,24 @@ import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch, resample_poly
 
 
-def resample(data: np.ndarray, sampling_rate: float, params: dict) -> tuple[np.ndarray, float]:
+def resample(
+    data: np.ndarray,
+    sampling_rate: float,
+    params: dict,
+    context: dict | None = None,
+) -> tuple[np.ndarray, float]:
     """Resample data to a target sampling rate.
 
     Args:
         data: EEG data array (sessions, recordings, channels, samples).
         sampling_rate: Current sampling rate in Hz.
         params: Must contain 'target_rate' (Hz).
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         (resampled_data, new_sampling_rate)
     """
+    del context
     target_rate = params["target_rate"]
     if target_rate == sampling_rate:
         return data, sampling_rate
@@ -38,17 +45,24 @@ def resample(data: np.ndarray, sampling_rate: float, params: dict) -> tuple[np.n
     return resampled.astype(data.dtype), float(target_rate)
 
 
-def bandpass_filter(data: np.ndarray, sampling_rate: float, params: dict) -> tuple[np.ndarray, float]:
+def bandpass_filter(
+    data: np.ndarray,
+    sampling_rate: float,
+    params: dict,
+    context: dict | None = None,
+) -> tuple[np.ndarray, float]:
     """Apply band-pass/high-pass/low-pass filter.
 
     Args:
         data: EEG data (sessions, recordings, channels, samples).
         sampling_rate: Sampling rate in Hz.
         params: 'l_freq' and/or 'h_freq' in Hz.
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         (filtered_data, sampling_rate)
     """
+    del context
     l_freq = params.get("l_freq")
     h_freq = params.get("h_freq")
     order = params.get("order", 5)
@@ -67,17 +81,24 @@ def bandpass_filter(data: np.ndarray, sampling_rate: float, params: dict) -> tup
     return filtered.astype(data.dtype), sampling_rate
 
 
-def notch_filter(data: np.ndarray, sampling_rate: float, params: dict) -> tuple[np.ndarray, float]:
+def notch_filter(
+    data: np.ndarray,
+    sampling_rate: float,
+    params: dict,
+    context: dict | None = None,
+) -> tuple[np.ndarray, float]:
     """Apply notch filter to remove powerline interference.
 
     Args:
         data: EEG data (sessions, recordings, channels, samples).
         sampling_rate: Sampling rate in Hz.
         params: 'notch_freq' (e.g., 50.0 or 60.0 Hz).
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         (filtered_data, sampling_rate)
     """
+    del context
     notch_freq = params["notch_freq"]
     quality = params.get("quality", 30.0)
     b, a = iirnotch(notch_freq, quality, sampling_rate)
@@ -85,17 +106,24 @@ def notch_filter(data: np.ndarray, sampling_rate: float, params: dict) -> tuple[
     return filtered.astype(data.dtype), sampling_rate
 
 
-def reference(data: np.ndarray, sampling_rate: float, params: dict) -> tuple[np.ndarray, float]:
+def reference(
+    data: np.ndarray,
+    sampling_rate: float,
+    params: dict,
+    context: dict | None = None,
+) -> tuple[np.ndarray, float]:
     """Re-reference EEG data.
 
     Args:
         data: EEG data (sessions, recordings, channels, samples).
         sampling_rate: Sampling rate in Hz.
         params: 'type' - "CAR" (common average reference).
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         (re-referenced_data, sampling_rate)
     """
+    del context
     ref_type = params.get("type", "CAR")
     if ref_type == "CAR":
         # Common Average Reference: subtract mean across channels

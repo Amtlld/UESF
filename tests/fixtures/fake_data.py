@@ -21,6 +21,7 @@ def create_fake_raw_dataset(
     eeg_data_key: str = "data",
     label_key: str = "label",
     sampling_rate: float = 250.0,
+    electrode_list: list[str] | None = None,
 ) -> Path:
     """Create a fake raw EEG dataset with .mat files and raw.yml.
 
@@ -63,6 +64,8 @@ def create_fake_raw_dataset(
             "numeric_to_semantic": numeric_to_semantic,
         }
     }
+    if electrode_list is not None:
+        raw_config["raw"]["electrode_list"] = list(electrode_list)
 
     with open(dataset_dir / "raw.yml", "w", encoding="utf-8") as f:
         yaml.dump(raw_config, f, default_flow_style=False)

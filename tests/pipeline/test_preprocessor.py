@@ -110,6 +110,56 @@ class TestPreprocessor:
         assert record["numeric_to_semantic"] == raw_record["numeric_to_semantic"]
 
 
+class TestPreprocessorICA:
+    def test_ica_end_to_end(self, db, uesf_home, tmp_path):
+        config = ConfigManager(db, uesf_home)
+        data_mgr = DataManager(db, config)
+        preprocessor = Preprocessor(db, config)
+
+        ch_names = ["Fp1", "Fp2", "F3", "F4", "C3", "C4", "O1", "O2"]
+        ds_dir = create_fake_raw_dataset(
+            tmp_path,
+            name="raw_for_ica",
+            n_subjects=2,
+            n_sessions=1,
+            n_recordings=1,
+            n_channels=8,
+            n_samples=500,
+            sampling_rate=200.0,
+            electrode_list=ch_names,
+        )
+        data_mgr.register_raw(ds_dir)
+
+        figs_dir = tmp_path / "ica_figs"
+        preprocess_config = {
+            "pipeline": {
+                "data": [
+                    {
+                        "name": "ica",
+                        "params": {
+                            "method": "infomax",
+                            "n_components": 3,
+                            "random_state": 0,
+                            "max_iter": 200,
+                            "eog_ch_names": ["Fp1", "Fp2"],
+                            "figures_dir": str(figs_dir),
+                        },
+                    }
+                ]
+            }
+        }
+        record = preprocessor.run(preprocess_config, "raw_for_ica", "ica_cleaned")
+
+        out_dir = Path(record["data_dir_path"])
+        assert (out_dir / "eeg_data.npy").exists()
+        data = np.load(out_dir / "eeg_data.npy")
+        assert data.shape == (2, 1, 1, 8, 500)
+        assert figs_dir.exists()
+        fig_files = list(figs_dir.iterdir())
+        # At minimum: 2 EOG channels × 2 subjects = 4 PNGs.
+        assert len(fig_files) >= 4
+
+
 class TestMaskedDataset:
     def test_create_masked(self, setup):
         preprocessor, data_mgr, config = setup

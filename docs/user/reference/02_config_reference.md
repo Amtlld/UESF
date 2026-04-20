@@ -92,9 +92,12 @@ preprocess:
           notch_freq: 50.0
       - name: ica
         params:
-          method: fastica
-          n_components: 0.95
-          exclude_eog_ecg: true
+          method: picard          # MNE ICA() 参数全部透传
+          n_components: null
+          random_state: 97
+          max_iter: 1000
+          eog_ch_names: [Fp1, Fp2]  # 作为 EOG 参考的通道名
+          figures_dir: ./ica_figs   # 可选 figures 输出目录
       - name: resample
         params:
           target_rate: 128

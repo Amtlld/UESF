@@ -10,7 +10,11 @@ import numpy as np
 
 
 def sliding_window(
-    data: np.ndarray, labels: np.ndarray, sampling_rate: float, params: dict
+    data: np.ndarray,
+    labels: np.ndarray,
+    sampling_rate: float,
+    params: dict,
+    context: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Apply sliding window epoching.
 
@@ -26,10 +30,12 @@ def sliding_window(
             stride_sec: Stride duration in seconds.
             window_type: "rect" or "hanning".
             label_strategy: "mode" or "last".
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         (windowed_data, windowed_labels, sampling_rate)
     """
+    del context
     window_size_sec = params["window_size_sec"]
     stride_sec = params.get("stride_sec", window_size_sec)
     window_type = params.get("window_type", "rect")
@@ -87,7 +93,11 @@ def sliding_window(
 
 
 def epoch_normalize(
-    data: np.ndarray, labels: np.ndarray, sampling_rate: float, params: dict
+    data: np.ndarray,
+    labels: np.ndarray,
+    sampling_rate: float,
+    params: dict,
+    context: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Per-epoch normalization (safe, no cross-subject leakage).
 
@@ -98,10 +108,12 @@ def epoch_normalize(
         params:
             method: "zscore" or "minmax".
             axis: Axis to normalize along (default: -1, samples axis).
+        context: Optional per-subject metadata (unused here).
 
     Returns:
         (normalized_data, labels, sampling_rate)
     """
+    del context
     method = params.get("method", "zscore")
     axis = params.get("axis", -1)
 
