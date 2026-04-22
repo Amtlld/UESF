@@ -48,6 +48,7 @@ from uesf.experiment.dataloader_builder import (
     prepare_uda_channel_data,
 )
 from uesf.experiment.evaluator import Evaluator
+from uesf.experiment.label_mapping import apply_label_mapping
 from uesf.experiment.logger import create_logger
 from uesf.experiment.runner import Runner
 from uesf.experiment.splitter import (
@@ -264,6 +265,7 @@ class ExperimentManager:
             dataset_cache, labels_cache, metadata_cache = self._load_all_datasets(
                 cfg["datasets"]
             )
+            apply_label_mapping(cfg["datasets"], labels_cache, metadata_cache)
             if cfg.get("alignment") and len(dataset_cache) > 1:
                 self._apply_alignment(
                     dataset_cache, metadata_cache, cfg["alignment"]

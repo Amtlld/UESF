@@ -1,11 +1,12 @@
 """Experiment config normalization and validation.
 
-:class:`ConfigValidator` implements the 30 rules (R1–R30) listed in
-``docs/version_design/0.1.0.dev6_design/07_config_validation_rules.md``.
+:class:`ConfigValidator` implements the 31 rules (R1–R31) listed in
+``docs/version_design/0.1.0.dev6_design/07_config_validation_rules.md``
+and ``docs/version_design/0.1.0.dev9_design/01_label_mapping.md`` (R31).
 
 Responsibilities are split:
 - :meth:`ConfigValidator.normalize` fills defaults and rewrites legacy keys.
-- :meth:`ConfigValidator.validate` runs R1–R30 on the normalized config.
+- :meth:`ConfigValidator.validate` runs R1–R31 on the normalized config.
 """
 
 from __future__ import annotations
@@ -108,6 +109,9 @@ class ConfigValidator:
         # transforms checks (R22/R23/R29)
         _validate_transforms(datasets, mode)
 
+        # label_mapping checks (R31)
+        _validate_label_mapping(datasets)
+
         if mode == "regular":
             _validate_regular_split(config["split"], datasets)
         else:
@@ -201,6 +205,63 @@ def _validate_transforms(datasets: dict, mode: str) -> None:
                         f"{i} (R29): '{reference_alias}'={a['name']}/{a['scope']} vs "
                         f"'{alias}'={b['name']}/{b['scope']}.",
                     )
+
+
+# ---------------------------------------------------------------------------
+# label_mapping (R31)
+# ---------------------------------------------------------------------------
+
+
+def _validate_label_mapping(datasets: dict) -> None:
+    """Validate per-dataset ``label_mapping`` blocks (R31).
+
+    Checks:
+    - If present, must be a non-empty ``dict[str, str]`` with non-empty
+      string keys and values.
+    - In multi-dataset experiments, all aliases that declare a
+      ``label_mapping`` must map to the same set of target semantic
+      values — otherwise post-mapping class spaces cannot align.
+    Deep validation (mapping keys exactly cover the dataset's
+    ``numeric_to_semantic``) is performed at runtime by
+    :func:`uesf.experiment.label_mapping.apply_label_mapping`, since
+    that requires reading the preprocessed dataset's metadata.
+    """
+    per_alias_targets: dict[str, set[str]] = {}
+    for alias, dcfg in datasets.items():
+        mapping = (dcfg or {}).get("label_mapping")
+        if mapping is None:
+            continue
+        if not isinstance(mapping, dict) or not mapping:
+            raise TypeMismatchError(
+                f"dataset '{alias}': label_mapping must be a non-empty "
+                f"dict[str, str], got {type(mapping).__name__} (R31).",
+            )
+        for k, v in mapping.items():
+            if not isinstance(k, str) or not k:
+                raise TypeMismatchError(
+                    f"dataset '{alias}': label_mapping keys must be "
+                    f"non-empty strings, got key {k!r} (R31).",
+                )
+            if not isinstance(v, str) or not v:
+                raise TypeMismatchError(
+                    f"dataset '{alias}': label_mapping values must be "
+                    f"non-empty strings, got value {v!r} for key {k!r} (R31).",
+                )
+        per_alias_targets[alias] = set(mapping.values())
+
+    if len(per_alias_targets) > 1:
+        aliases = list(per_alias_targets.keys())
+        reference_alias = aliases[0]
+        reference = per_alias_targets[reference_alias]
+        for alias in aliases[1:]:
+            if per_alias_targets[alias] != reference:
+                raise ConfigError(
+                    "Cross-dataset label_mapping target sets mismatch (R31): "
+                    f"'{reference_alias}'={sorted(reference)} vs "
+                    f"'{alias}'={sorted(per_alias_targets[alias])}.",
+                    hint="Ensure every label_mapping block in a multi-dataset "
+                    "experiment targets the same set of semantic values.",
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Tests for ConfigValidator — R1–R30 normalization and validation rules."""
+"""Tests for ConfigValidator — R1–R31 normalization and validation rules."""
 
 from __future__ import annotations
 
@@ -668,3 +668,71 @@ class TestSingleDatasetAlignmentWarning:
         with caplog.at_level("WARNING", logger="uesf.experiment.config_schema"):
             ConfigValidator.validate(ConfigValidator.normalize(raw))
         assert any("R16" in rec.message or "alignment" in rec.message for rec in caplog.records)
+
+
+class TestLabelMappingRules:
+    def test_r31_valid_single_dataset(self):
+        raw = _regular_holdout()
+        raw["datasets"]["ds0"]["label_mapping"] = {"x": "foo", "y": "bar"}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))  # no raise
+
+    def test_r31_non_dict_raises(self):
+        raw = _regular_holdout()
+        raw["datasets"]["ds0"]["label_mapping"] = ["x", "y"]
+        with pytest.raises(TypeMismatchError, match="R31"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r31_empty_dict_raises(self):
+        raw = _regular_holdout()
+        raw["datasets"]["ds0"]["label_mapping"] = {}
+        with pytest.raises(TypeMismatchError, match="R31"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r31_non_string_key_raises(self):
+        raw = _regular_holdout()
+        raw["datasets"]["ds0"]["label_mapping"] = {1: "foo"}
+        with pytest.raises(TypeMismatchError, match="R31"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r31_non_string_value_raises(self):
+        raw = _regular_holdout()
+        raw["datasets"]["ds0"]["label_mapping"] = {"x": 1}
+        with pytest.raises(TypeMismatchError, match="R31"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r31_empty_string_value_raises(self):
+        raw = _regular_holdout()
+        raw["datasets"]["ds0"]["label_mapping"] = {"x": ""}
+        with pytest.raises(TypeMismatchError, match="R31"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_r31_cross_dataset_target_set_consistency_passes(self):
+        raw = _regular_holdout(datasets_count=2, dimension="dataset")
+        raw["split"] = {
+            "strategy": "holdout",
+            "dimension": "dataset",
+            "assign": {"train": ["ds0"], "test": ["ds1"]},
+        }
+        raw["datasets"]["ds0"]["label_mapping"] = {
+            "anger": "negative", "joy": "positive",
+        }
+        raw["datasets"]["ds1"]["label_mapping"] = {
+            "Anger": "negative", "Joy": "positive",
+        }
+        ConfigValidator.validate(ConfigValidator.normalize(raw))  # no raise
+
+    def test_r31_cross_dataset_target_set_mismatch_raises(self):
+        raw = _regular_holdout(datasets_count=2, dimension="dataset")
+        raw["split"] = {
+            "strategy": "holdout",
+            "dimension": "dataset",
+            "assign": {"train": ["ds0"], "test": ["ds1"]},
+        }
+        raw["datasets"]["ds0"]["label_mapping"] = {
+            "anger": "negative", "joy": "positive",
+        }
+        raw["datasets"]["ds1"]["label_mapping"] = {
+            "Anger": "bad", "Joy": "good",  # different target set
+        }
+        with pytest.raises(ConfigError, match="R31"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
