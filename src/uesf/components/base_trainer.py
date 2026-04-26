@@ -38,6 +38,15 @@ class BaseTrainer:
         """
         return None
 
+    def on_fit_start(self, train_loader: Any, epochs: int) -> None:
+        """Hook fired once before the first training epoch.
+
+        Default is a no-op. Override when the trainer needs to derive
+        schedule-dependent state (e.g. total step count) from the
+        already-built dataloader and configured epoch count.
+        """
+        return None
+
     @abstractmethod
     def training_step(
         self,

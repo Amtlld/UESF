@@ -256,6 +256,8 @@ class Runner:
 
         logger_cm = training_logger if training_logger is not None else contextlib.nullcontext()
 
+        self.trainer.on_fit_start(train_loader, self.epochs)
+
         with logger_cm:
             for epoch in range(self.epochs):
                 self._train_preds = []

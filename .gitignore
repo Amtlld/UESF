@@ -16,3 +16,4 @@ docs/legacy/
 tmp/
 docs/log/
 CLAUDE.md
+.coverage
