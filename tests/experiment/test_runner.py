@@ -165,7 +165,7 @@ class TestRunner:
             val_loader=val_loader,
             optimizer=optimizer,
             early_stopping_config={
-                "monitor": "val_accuracy",
+                "metric": "val_accuracy",
                 "patience": 2,
                 "mode": "max",
             },

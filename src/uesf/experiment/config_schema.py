@@ -39,6 +39,8 @@ class ConfigValidator:
         cfg.setdefault("seed", 42)
         cfg.setdefault("mode", "regular")
 
+        _normalize_early_stopping(cfg.get("training"))
+
         _rename_kfold_key(cfg.get("split"))
         # normalize main split block
         if "split" in cfg and cfg["split"] is not None:
@@ -143,6 +145,24 @@ def _rename_kfold_key(block: dict | None) -> None:
             block["k"] = block.pop(legacy)
         elif legacy in block:
             block.pop(legacy)
+
+
+def _normalize_early_stopping(training: dict | None) -> None:
+    """Rename legacy ``early_stopping.monitor`` to canonical ``metric``.
+
+    Keeps existing YAMLs that used ``monitor`` working. If both are present,
+    ``metric`` wins and ``monitor`` is dropped without raising — they were
+    almost certainly meant to be the same field.
+    """
+    if not isinstance(training, dict):
+        return
+    es = training.get("early_stopping")
+    if not isinstance(es, dict):
+        return
+    if "monitor" in es:
+        if "metric" not in es:
+            es["metric"] = es["monitor"]
+        es.pop("monitor", None)
 
 
 def _normalize_split_block(split: dict) -> None:
@@ -710,6 +730,8 @@ def _validate_training(config: dict, mode: str) -> None:
                     f"(R37): {missing}. Declared evaluation.metrics: {list(eval_metrics)}.",
                 )
 
+    _validate_early_stopping(training.get("early_stopping"))
+
     # R24
     if mode == "uda":
         adaptation = config["uda"].get("adaptation")
@@ -725,6 +747,51 @@ def _validate_training(config: dict, mode: str) -> None:
 
 
 _ALLOWED_TEST_WITH = {"best", "last"}
+_ALLOWED_ES_MODES = {"min", "max"}
+
+
+def _validate_early_stopping(es: object) -> None:
+    """Validate ``training.early_stopping`` once normalized.
+
+    The block is optional, but when present it must declare ``metric`` —
+    without it the runner crashes mid-training with a deep KeyError.
+    """
+    if es is None:
+        return
+    if not isinstance(es, dict):
+        raise TypeMismatchError(
+            f"training.early_stopping must be a dict, got {type(es).__name__}.",
+        )
+
+    metric = es.get("metric")
+    if not isinstance(metric, str) or not metric:
+        raise MissingRequiredKeyError(
+            "training.early_stopping.metric is required and must be a non-empty "
+            "string (e.g. 'val_loss', 'val_accuracy').",
+        )
+
+    mode = es.get("mode")
+    if mode is not None and (not isinstance(mode, str) or mode not in _ALLOWED_ES_MODES):
+        raise TypeMismatchError(
+            f"training.early_stopping.mode must be one of {sorted(_ALLOWED_ES_MODES)}, "
+            f"got {mode!r}.",
+        )
+
+    patience = es.get("patience")
+    if patience is not None and (
+        isinstance(patience, bool) or not isinstance(patience, int) or patience <= 0
+    ):
+        raise TypeMismatchError(
+            f"training.early_stopping.patience must be a positive int, got {patience!r}.",
+        )
+
+    min_delta = es.get("min_delta")
+    if min_delta is not None and (
+        isinstance(min_delta, bool) or not isinstance(min_delta, (int, float))
+    ):
+        raise TypeMismatchError(
+            f"training.early_stopping.min_delta must be a number, got {min_delta!r}.",
+        )
 
 
 def _validate_evaluation(config: dict) -> None:

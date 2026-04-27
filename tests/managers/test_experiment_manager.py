@@ -191,6 +191,20 @@ class TestEvaluationTestWith:
             "Loaded best checkpoint" in rec.message for rec in caplog.records
         )
 
+    def test_early_stopping_runs_without_keyerror(self, tmp_path):
+        # Regression: early_stopping with metric (not legacy 'monitor') used to
+        # crash at epoch boundary with KeyError('monitor'). Train to completion
+        # and verify the run finished cleanly.
+        ctx = self._make_ctx(tmp_path)
+        ctx.config["training"]["early_stopping"] = {
+            "metric": "val_accuracy",
+            "patience": 3,
+            "mode": "max",
+        }
+        fold_results = RegularExecutionStrategy().run(ctx)
+        assert fold_results, "expected at least one fold result"
+        assert fold_results[0].failed is False, fold_results[0].error
+
     def test_best_warns_and_falls_back_when_no_checkpoint_saved(
         self, tmp_path, caplog
     ):

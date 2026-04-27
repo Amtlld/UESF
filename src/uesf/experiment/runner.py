@@ -303,7 +303,7 @@ class Runner:
                 if scheduler is not None:
                     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                         monitor = (
-                            early_stopping_config.get("monitor", "val_loss")
+                            early_stopping_config.get("metric", "val_loss")
                             if early_stopping_config
                             else "val_loss"
                         )
@@ -367,7 +367,7 @@ class Runner:
                             )
 
                 if early_stopper and early_stopping_config:
-                    monitor = early_stopping_config["monitor"]
+                    monitor = early_stopping_config["metric"]
                     combined = {**train_metrics, **val_metrics}
                     if monitor in combined and isinstance(combined[monitor], (int, float)):
                         if early_stopper.step(combined[monitor]):

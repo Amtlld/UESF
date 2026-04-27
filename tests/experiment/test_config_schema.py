@@ -661,6 +661,86 @@ class TestLoggingRules:
         ConfigValidator.validate(ConfigValidator.normalize(raw))
 
 
+class TestEarlyStoppingNormalizeAndValidate:
+    def test_legacy_monitor_renamed_to_metric(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "early_stopping": {"monitor": "val_loss", "patience": 3, "mode": "min"},
+        }
+        cfg = ConfigValidator.normalize(raw)
+        es = cfg["training"]["early_stopping"]
+        assert es["metric"] == "val_loss"
+        assert "monitor" not in es
+
+    def test_metric_wins_when_both_present(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "early_stopping": {
+                "metric": "val_accuracy",
+                "monitor": "val_loss",
+                "mode": "max",
+            },
+        }
+        cfg = ConfigValidator.normalize(raw)
+        es = cfg["training"]["early_stopping"]
+        assert es["metric"] == "val_accuracy"
+        assert "monitor" not in es
+
+    def test_metric_required(self):
+        raw = _regular_holdout()
+        raw["training"] = {"epochs": 1, "early_stopping": {"patience": 3}}
+        with pytest.raises(MissingRequiredKeyError, match="early_stopping.metric"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_metric_must_be_string(self):
+        raw = _regular_holdout()
+        raw["training"] = {"epochs": 1, "early_stopping": {"metric": 42}}
+        with pytest.raises(MissingRequiredKeyError, match="early_stopping.metric"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_invalid_mode_rejected(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "early_stopping": {"metric": "val_loss", "mode": "highest"},
+        }
+        with pytest.raises(TypeMismatchError, match="early_stopping.mode"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_patience_must_be_positive_int(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "early_stopping": {"metric": "val_loss", "patience": 0},
+        }
+        with pytest.raises(TypeMismatchError, match="early_stopping.patience"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_min_delta_must_be_number(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "early_stopping": {"metric": "val_loss", "min_delta": "small"},
+        }
+        with pytest.raises(TypeMismatchError, match="early_stopping.min_delta"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_full_valid_block_passes(self):
+        raw = _regular_holdout()
+        raw["training"] = {
+            "epochs": 1,
+            "early_stopping": {
+                "metric": "val_f1_score",
+                "patience": 15,
+                "min_delta": 0.001,
+                "mode": "max",
+            },
+        }
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+
 class TestEvaluationTestWith:
     def test_default_omitted_passes(self):
         raw = _regular_holdout()
