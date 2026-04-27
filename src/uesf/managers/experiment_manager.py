@@ -1007,6 +1007,24 @@ def _train_and_evaluate(
     predictions: list = []
     targets: list = []
     if test_loader is not None and len(test_loader) > 0:
+        eval_cfg = ctx.config.get("evaluation") or {}
+        test_with = eval_cfg.get("test_with", "last")
+        if test_with == "best":
+            best_ckpt = (
+                checkpoint_dir / "best_model.pt" if checkpoint_dir is not None else None
+            )
+            if best_ckpt is not None and best_ckpt.exists():
+                trainer.model.load_state_dict(
+                    torch.load(best_ckpt, map_location=ctx.device)
+                )
+                logger.info("Loaded best checkpoint for test evaluation: %s", best_ckpt)
+            else:
+                logger.warning(
+                    "evaluation.test_with='best' but no best checkpoint was saved "
+                    "during training (e.g. validation never produced %r) — falling "
+                    "back to the model state at training end.",
+                    checkpoint_metric,
+                )
         test_metrics, predictions, targets = runner.validate_epoch(test_loader)
         for k, v in test_metrics.items():
             metrics[f"test_{k}"] = v

@@ -661,6 +661,37 @@ class TestLoggingRules:
         ConfigValidator.validate(ConfigValidator.normalize(raw))
 
 
+class TestEvaluationTestWith:
+    def test_default_omitted_passes(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"]}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))  # no raise
+
+    def test_last_explicit_passes(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": "last"}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_invalid_value_rejected(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": "newest"}
+        with pytest.raises(TypeMismatchError, match="evaluation.test_with"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_best_without_checkpoint_rejected(self):
+        raw = _regular_holdout()
+        raw["training"] = {"epochs": 1}
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": "best"}
+        with pytest.raises(ConfigError, match="training.checkpoint.metric"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_best_with_checkpoint_passes(self):
+        raw = _regular_holdout()
+        raw["training"] = {"epochs": 1, "checkpoint": {"metric": "val_accuracy"}}
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": "best"}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+
 class TestSingleDatasetAlignmentWarning:
     def test_r16_single_dataset_with_alignment_warns(self, caplog):
         raw = _regular_holdout()

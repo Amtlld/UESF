@@ -329,3 +329,4 @@ dev6 **自动通道接线**，无需配置。Trainer 接到的 `batch` 键：
 |------|----------|------|
 | `evaluation.metrics` | 可选 | 指标名称列表，默认 `[accuracy]` |
 | `evaluation.k_fold_aggregation` | 可选 | `concat`（默认）或 `mean_std` |
+| `evaluation.test_with` | 可选 | `last`（默认）使用训练结束时的模型评估测试集；`best` 加载 `training.checkpoint` 保存的 `best_model.pt` 后再评估。设为 `best` 时必须同时配置 `training.checkpoint.metric`，否则触发 `ConfigError`。若训练期间从未触发 best 保存（如无验证集 / 监控指标拼写错误），框架会 WARN 并退回 `last`。 |

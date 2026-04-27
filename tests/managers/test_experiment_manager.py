@@ -107,3 +107,102 @@ class TestRegularStrategySingleDataset:
         assert "fold_idx" in fr.fold_info
         # Per-fold directory created
         assert (tmp_path / "fold_0").exists()
+
+
+class TestEvaluationTestWith:
+    """End-to-end check that evaluation.test_with controls which model state
+    runs the post-training test pass."""
+
+    def _make_ctx(self, tmp_path, *, checkpoint=None, test_with=None):
+        import torch as t
+
+        from uesf.components.builtin_metrics import accuracy
+        from uesf.components.dummy import DummyModel, DummyTrainer
+
+        data = np.random.RandomState(0).randn(4, 1, 2, 2, 4).astype(np.float32)
+        labels = np.random.randint(0, 2, 8).astype(np.int64)
+
+        training = {
+            "epochs": 2,
+            "batch_size": 2,
+            "optimizer": {"name": "adam", "params": {"lr": 0.01}},
+        }
+        if checkpoint is not None:
+            training["checkpoint"] = checkpoint
+        evaluation = {"metrics": ["accuracy"]}
+        if test_with is not None:
+            evaluation["test_with"] = test_with
+
+        return ExperimentContext(
+            config={
+                "seed": 0,
+                "split": {
+                    "strategy": "holdout",
+                    "dimension": "subject",
+                    "train_ratio": 0.5,
+                    "val_ratio": 0.25,
+                    "test_ratio": 0.25,
+                    "shuffle": False,
+                },
+                "datasets": {"ds": {"name": "ds"}},
+                "training": training,
+                "evaluation": evaluation,
+            },
+            dataset_cache={"ds": data},
+            labels_cache={"ds": labels},
+            metadata_cache={"ds": {"n_channels": 2, "n_samples": 4, "n_classes": 2}},
+            experiment_id=1,
+            output_dir=tmp_path,
+            device=t.device("cpu"),
+            project_dir=tmp_path,
+            seed=0,
+            model_cls=DummyModel,
+            model_params={},
+            trainer_cls=DummyTrainer,
+            trainer_params={},
+            metric_funcs={"accuracy": accuracy},
+            num_workers=0,
+        )
+
+    def test_best_loads_checkpoint_for_test(self, tmp_path, caplog):
+        ctx = self._make_ctx(
+            tmp_path,
+            checkpoint={"metric": "val_accuracy"},
+            test_with="best",
+        )
+        with caplog.at_level("INFO", logger="uesf.manager.experiment"):
+            RegularExecutionStrategy().run(ctx)
+        assert (tmp_path / "fold_0" / "checkpoints" / "best_model.pt").exists()
+        assert any(
+            "Loaded best checkpoint" in rec.message for rec in caplog.records
+        ), "expected an INFO log confirming the best checkpoint was loaded"
+
+    def test_last_does_not_load_checkpoint(self, tmp_path, caplog):
+        ctx = self._make_ctx(
+            tmp_path,
+            checkpoint={"metric": "val_accuracy"},
+            test_with="last",
+        )
+        with caplog.at_level("INFO", logger="uesf.manager.experiment"):
+            RegularExecutionStrategy().run(ctx)
+        # checkpoint is still saved when configured, just not used for testing
+        assert (tmp_path / "fold_0" / "checkpoints" / "best_model.pt").exists()
+        assert not any(
+            "Loaded best checkpoint" in rec.message for rec in caplog.records
+        )
+
+    def test_best_warns_and_falls_back_when_no_checkpoint_saved(
+        self, tmp_path, caplog
+    ):
+        # checkpoint.metric never matches any val key → best_model.pt is never saved
+        ctx = self._make_ctx(
+            tmp_path,
+            checkpoint={"metric": "val_nonexistent"},
+            test_with="best",
+        )
+        with caplog.at_level("WARNING", logger="uesf.manager.experiment"):
+            RegularExecutionStrategy().run(ctx)
+        assert not (tmp_path / "fold_0" / "checkpoints" / "best_model.pt").exists()
+        assert any(
+            "no best checkpoint was saved" in rec.message for rec in caplog.records
+        )

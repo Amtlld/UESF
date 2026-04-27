@@ -120,6 +120,9 @@ class ConfigValidator:
         # training block validation (R17/R18/R24)
         _validate_training(config, mode)
 
+        # evaluation block validation
+        _validate_evaluation(config)
+
         # R16 — multi-dataset + alignment warning already in caller; single-dataset + alignment warn here
         if len(datasets) == 1 and config.get("alignment"):
             logger.warning(
@@ -719,6 +722,35 @@ def _validate_training(config: dict, mode: str) -> None:
                 raise ConfigError(
                     "training.checkpoint not allowed for transductive UDA (R24).",
                 )
+
+
+_ALLOWED_TEST_WITH = {"best", "last"}
+
+
+def _validate_evaluation(config: dict) -> None:
+    """Validate the ``evaluation`` block (currently only ``test_with``)."""
+    evaluation = config.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return
+
+    test_with = evaluation.get("test_with")
+    if test_with is None:
+        return
+
+    if not isinstance(test_with, str) or test_with not in _ALLOWED_TEST_WITH:
+        raise TypeMismatchError(
+            f"evaluation.test_with must be one of {sorted(_ALLOWED_TEST_WITH)}, "
+            f"got {test_with!r}.",
+        )
+
+    if test_with == "best":
+        training = config.get("training") or {}
+        ckpt = training.get("checkpoint") if isinstance(training, dict) else None
+        if not isinstance(ckpt, dict) or not ckpt.get("metric"):
+            raise ConfigError(
+                "evaluation.test_with='best' requires training.checkpoint.metric "
+                "to be set so a best-model snapshot is saved during training.",
+            )
 
 
 def _validate_metric_name_list(value, field_name: str, rule: str) -> None:
