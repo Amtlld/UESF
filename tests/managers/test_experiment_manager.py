@@ -220,3 +220,36 @@ class TestEvaluationTestWith:
         assert any(
             "no best checkpoint was saved" in rec.message for rec in caplog.records
         )
+
+    def test_last_n_aggregates_test_metrics_over_last_n_epochs(
+        self, tmp_path, caplog
+    ):
+        # epochs=3, last=2 → test set evaluated each epoch; final test metrics
+        # come from concatenating the last 2 epochs' predictions/targets.
+        ctx = self._make_ctx(tmp_path, test_with={"last": 2})
+        ctx.config["training"]["epochs"] = 3
+        with caplog.at_level("INFO", logger="uesf.manager.experiment"):
+            fold_results = RegularExecutionStrategy().run(ctx)
+        fr = fold_results[0]
+        assert fr.failed is False, fr.error
+        # Aggregated test metric must land in the fold metrics
+        assert any(k.startswith("test_") for k in fr.metrics), fr.metrics
+        # The user-facing log line is emitted
+        assert any(
+            "Aggregated test metrics over last 2 epoch(s)" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_last_n_falls_back_when_epochs_lt_n(self, tmp_path, caplog):
+        # epochs=2, last=10 → only 2 epochs available; we expect a WARN and
+        # the run still completes with aggregated test_ metrics.
+        ctx = self._make_ctx(tmp_path, test_with={"last": 10})
+        ctx.config["training"]["epochs"] = 2
+        with caplog.at_level("WARNING", logger="uesf.experiment.runner"):
+            fold_results = RegularExecutionStrategy().run(ctx)
+        fr = fold_results[0]
+        assert fr.failed is False, fr.error
+        assert any(k.startswith("test_") for k in fr.metrics)
+        assert any(
+            "only 2 epoch(s) ran" in rec.message for rec in caplog.records
+        )

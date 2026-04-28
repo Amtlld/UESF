@@ -804,10 +804,24 @@ def _validate_evaluation(config: dict) -> None:
     if test_with is None:
         return
 
+    if isinstance(test_with, dict):
+        if set(test_with.keys()) != {"last"}:
+            raise TypeMismatchError(
+                "evaluation.test_with dict form must contain exactly one key "
+                f"'last' (got keys {sorted(test_with.keys())!r}).",
+            )
+        n = test_with["last"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise TypeMismatchError(
+                "evaluation.test_with.last must be a positive int "
+                f"(got {n!r}).",
+            )
+        return
+
     if not isinstance(test_with, str) or test_with not in _ALLOWED_TEST_WITH:
         raise TypeMismatchError(
-            f"evaluation.test_with must be one of {sorted(_ALLOWED_TEST_WITH)}, "
-            f"got {test_with!r}.",
+            f"evaluation.test_with must be one of {sorted(_ALLOWED_TEST_WITH)} "
+            f"or a dict like {{'last': N}}, got {test_with!r}.",
         )
 
     if test_with == "best":

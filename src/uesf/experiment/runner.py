@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -209,6 +210,7 @@ class Runner:
         test_evaluator: Any | None = None,
         test_loader: Any | None = None,
         log_lr: bool = True,
+        last_n_test_aggregate: int | None = None,
     ) -> dict[str, Any]:
         """Run the full training loop.
 
@@ -230,8 +232,16 @@ class Runner:
                 ``test_loader`` each ``log_every_n_epochs``. Tags are
                 ``test_<name>``. Caller is responsible for warning about
                 data-leakage risk before invoking.
-            test_loader: DataLoader used only when ``test_evaluator`` is set.
+            test_loader: DataLoader used only when ``test_evaluator`` is set
+                or ``last_n_test_aggregate`` is enabled.
             log_lr: Whether to write learning rate scalars.
+            last_n_test_aggregate: When set to a positive int N, runs
+                ``test_loader`` at the end of every epoch and keeps the
+                predictions/targets from the last N epochs (a sliding window
+                via ``deque(maxlen=N)``). The collected tensors are returned
+                under ``last_n_test_preds`` / ``last_n_test_targets`` so the
+                caller can concatenate them and recompute aggregated metrics.
+                Requires ``test_loader`` to be a non-empty DataLoader.
 
         Returns:
             Dict with training history and best metrics.
@@ -243,6 +253,18 @@ class Runner:
                 min_delta=early_stopping_config.get("min_delta", 0.0),
                 mode=early_stopping_config.get("mode", "min"),
             )
+
+        if last_n_test_aggregate is not None and last_n_test_aggregate >= 1:
+            if test_loader is None or len(test_loader) == 0:
+                raise ValueError(
+                    "last_n_test_aggregate is set but test_loader is empty/None — "
+                    "evaluation.test_with={'last': N} needs a non-empty test set.",
+                )
+            last_n_window: deque[tuple[list[torch.Tensor], list[torch.Tensor]]] | None = deque(
+                maxlen=last_n_test_aggregate,
+            )
+        else:
+            last_n_window = None
 
         best_metric_value = None
         best_metrics: dict[str, Any] = {}
@@ -289,16 +311,23 @@ class Runner:
                 should_epoch_log = (epoch + 1) % log_every_n_epochs == 0
 
                 test_computed: dict[str, Any] = {}
-                if (
+                want_test_eval = (
                     test_evaluator is not None
                     and test_loader is not None
                     and len(test_loader) > 0
                     and should_epoch_log
-                ):
-                    raw_test, _, _ = self._evaluate_on_loader(
-                        test_loader, test_evaluator
+                )
+                if want_test_eval or last_n_window is not None:
+                    test_preds_epoch, test_targets_epoch = self._collect_loader(
+                        test_loader,
                     )
-                    test_computed = {f"test_{k}": v for k, v in raw_test.items()}
+                    if want_test_eval:
+                        raw_test = test_evaluator.compute_epoch_metrics(
+                            test_preds_epoch, test_targets_epoch,
+                        )
+                        test_computed = {f"test_{k}": v for k, v in raw_test.items()}
+                    if last_n_window is not None:
+                        last_n_window.append((test_preds_epoch, test_targets_epoch))
 
                 if scheduler is not None:
                     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -376,11 +405,57 @@ class Runner:
                             )
                             break
 
+        last_n_test_preds: list[torch.Tensor] = []
+        last_n_test_targets: list[torch.Tensor] = []
+        last_n_epochs_used = 0
+        if last_n_window is not None:
+            last_n_epochs_used = len(last_n_window)
+            for preds_epoch, targets_epoch in last_n_window:
+                last_n_test_preds.extend(preds_epoch)
+                last_n_test_targets.extend(targets_epoch)
+            if (
+                last_n_test_aggregate is not None
+                and last_n_epochs_used < last_n_test_aggregate
+            ):
+                logger.warning(
+                    "evaluation.test_with={'last': %d} but only %d epoch(s) ran "
+                    "(early stop / shorter schedule) — aggregating over the "
+                    "available epochs.",
+                    last_n_test_aggregate,
+                    last_n_epochs_used,
+                )
+
         return {
             "history": history,
             "best_metrics": best_metrics or (history[-1] if history else {}),
             "epochs_run": len(history),
+            "last_n_test_preds": last_n_test_preds,
+            "last_n_test_targets": last_n_test_targets,
+            "last_n_epochs_used": last_n_epochs_used,
         }
+
+    @torch.no_grad()
+    def _collect_loader(
+        self,
+        loader: Any,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Run forward pass over ``loader`` and return per-batch preds/targets.
+
+        Identical data path to :meth:`validate_epoch` but skips metric
+        computation — used when the caller wants raw tensors for downstream
+        aggregation (e.g. last-N-epoch test concatenation).
+        """
+        self.trainer.model.eval()
+        preds_list: list[torch.Tensor] = []
+        targets_list: list[torch.Tensor] = []
+        for batch_idx, batch in enumerate(loader):
+            batch = _move_batch_to_device(batch, self.device)
+            step_result = self.trainer.validation_step(batch, batch_idx)
+            if "preds" in step_result and step_result["preds"] is not None:
+                preds_list.append(step_result["preds"].detach().cpu())
+            if "targets" in step_result and step_result["targets"] is not None:
+                targets_list.append(step_result["targets"].detach().cpu())
+        return preds_list, targets_list
 
     @torch.no_grad()
     def _evaluate_on_loader(

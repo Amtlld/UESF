@@ -329,4 +329,4 @@ dev6 **自动通道接线**，无需配置。Trainer 接到的 `batch` 键：
 |------|----------|------|
 | `evaluation.metrics` | 可选 | 指标名称列表，默认 `[accuracy]` |
 | `evaluation.k_fold_aggregation` | 可选 | `concat`（默认）或 `mean_std` |
-| `evaluation.test_with` | 可选 | `last`（默认）使用训练结束时的模型评估测试集；`best` 加载 `training.checkpoint` 保存的 `best_model.pt` 后再评估。设为 `best` 时必须同时配置 `training.checkpoint.metric`，否则触发 `ConfigError`。若训练期间从未触发 best 保存（如无验证集 / 监控指标拼写错误），框架会 WARN 并退回 `last`。 |
+| `evaluation.test_with` | 可选 | `last`（默认）使用训练结束时的模型评估测试集；`best` 加载 `training.checkpoint` 保存的 `best_model.pt` 后再评估；`{last: N}`（dict 形态，N 为 ≥1 的正整数）则在每个 epoch 末跑一次测试集，对**最后 N 个 epoch** 的预测结果做拼接（concat）后用主 evaluator 重算指标，作为最终 `test_*` 写入。设为 `best` 时必须同时配置 `training.checkpoint.metric`，否则触发 `ConfigError`；`best` 训练期间从未触发保存时框架会 WARN 并退回 `last`。`{last: N}` 不需要 checkpoint，但**意味着测试集每个 epoch 都参与评估**——请确保该结果不会反向影响模型/超参选择，否则等同于在测试集上调参。若 `epochs < N`（含 early stopping 提前退出）框架会 WARN 并对实际可用的 epoch 聚合。聚合策略目前固定为 concat，未来计划支持 mean & std。 |

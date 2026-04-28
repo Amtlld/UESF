@@ -984,6 +984,20 @@ def _train_and_evaluate(
     epochs = training_config.get("epochs", 1)
     runner = Runner(trainer, evaluator, ctx.device, {"epochs": epochs, **training_config})
 
+    eval_cfg = ctx.config.get("evaluation") or {}
+    test_with = eval_cfg.get("test_with", "last")
+    last_n_test_aggregate: int | None = None
+    if isinstance(test_with, dict) and "last" in test_with:
+        last_n_test_aggregate = int(test_with["last"])
+        logger.info(
+            "evaluation.test_with={'last': %d} — test set will be evaluated each "
+            "epoch and aggregated (concat) over the last %d epoch(s); this is a "
+            "deliberate test-set touch, ensure it does not feed back into model "
+            "selection.",
+            last_n_test_aggregate,
+            last_n_test_aggregate,
+        )
+
     run_result = runner.run(
         train_loader=train_loader,
         val_loader=val_loader,
@@ -1001,14 +1015,25 @@ def _train_and_evaluate(
         test_evaluator=test_evaluator,
         test_loader=test_loader,
         log_lr=log_lr,
+        last_n_test_aggregate=last_n_test_aggregate,
     )
 
     metrics = {**run_result["best_metrics"]}
     predictions: list = []
     targets: list = []
-    if test_loader is not None and len(test_loader) > 0:
-        eval_cfg = ctx.config.get("evaluation") or {}
-        test_with = eval_cfg.get("test_with", "last")
+    if last_n_test_aggregate is not None:
+        predictions = run_result.get("last_n_test_preds", []) or []
+        targets = run_result.get("last_n_test_targets", []) or []
+        if predictions and targets:
+            test_metrics = evaluator.compute_epoch_metrics(predictions, targets)
+            for k, v in test_metrics.items():
+                metrics[f"test_{k}"] = v
+            logger.info(
+                "Aggregated test metrics over last %d epoch(s) (concat): %s",
+                run_result.get("last_n_epochs_used", 0),
+                {k: v for k, v in test_metrics.items()},
+            )
+    elif test_loader is not None and len(test_loader) > 0:
         if test_with == "best":
             best_ckpt = (
                 checkpoint_dir / "best_model.pt" if checkpoint_dir is not None else None

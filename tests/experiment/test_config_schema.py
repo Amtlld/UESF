@@ -771,6 +771,58 @@ class TestEvaluationTestWith:
         raw["evaluation"] = {"metrics": ["accuracy"], "test_with": "best"}
         ConfigValidator.validate(ConfigValidator.normalize(raw))
 
+    def test_last_n_dict_passes(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"last": 5}}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_no_checkpoint_required(self):
+        # dict form does NOT require training.checkpoint.metric
+        raw = _regular_holdout()
+        raw["training"] = {"epochs": 3}
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"last": 2}}
+        ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_zero_rejected(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"last": 0}}
+        with pytest.raises(TypeMismatchError, match="test_with.last"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_negative_rejected(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"last": -1}}
+        with pytest.raises(TypeMismatchError, match="test_with.last"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_non_int_rejected(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"last": "10"}}
+        with pytest.raises(TypeMismatchError, match="test_with.last"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_bool_rejected(self):
+        # bool is a subclass of int — make sure it's rejected explicitly
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"last": True}}
+        with pytest.raises(TypeMismatchError, match="test_with.last"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_unknown_key_rejected(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {"metrics": ["accuracy"], "test_with": {"first": 5}}
+        with pytest.raises(TypeMismatchError, match="dict form must contain exactly one key"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
+    def test_last_n_dict_extra_key_rejected(self):
+        raw = _regular_holdout()
+        raw["evaluation"] = {
+            "metrics": ["accuracy"],
+            "test_with": {"last": 5, "aggregate": "concat"},
+        }
+        with pytest.raises(TypeMismatchError, match="dict form must contain exactly one key"):
+            ConfigValidator.validate(ConfigValidator.normalize(raw))
+
 
 class TestSingleDatasetAlignmentWarning:
     def test_r16_single_dataset_with_alignment_warns(self, caplog):
